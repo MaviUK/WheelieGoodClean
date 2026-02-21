@@ -1,68 +1,79 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
-import { prisma } from "@/lib/prisma";
-import { createSupabaseRouteHandlerClient } from "@/lib/supabase/route-handler-client";
-import { encryptString } from "@/lib/crypto/encryption";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
-function verifyAndReadState(state: string): { businessId: string; userId: string; ts: number } {
-  const secret = process.env.OAUTH_STATE_SECRET;
-  if (!secret) throw new Error("Missing env: OAUTH_STATE_SECRET");
-
-  const decoded = JSON.parse(Buffer.from(state, "base64url").toString("utf8")) as {
-    payloadJson: string;
-    sig: string;
-  };
-
-  const expected = crypto.createHmac("sha256", secret).update(decoded.payloadJson).digest("hex");
-  if (expected !== decoded.sig) throw new Error("Invalid OAuth state signature");
-
-  const payload = JSON.parse(decoded.payloadJson) as { businessId: string; userId: string; ts: number };
-  if (!payload.businessId || !payload.userId) throw new Error("Invalid OAuth state payload");
-
-  // Optional: expire state after 10 minutes
-  if (Date.now() - payload.ts > 10 * 60 * 1000) throw new Error("OAuth state expired");
-
-  return payload;
+function signState(payloadJson: string, secret: string) {
+  return crypto.createHmac("sha256", secret).update(payloadJson).digest("hex");
 }
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
-  const err = url.searchParams.get("error");
-
-  if (err) {
-    return NextResponse.redirect(new URL(`/dashboard/businesses?google_error=${encodeURIComponent(err)}`, req.url));
-  }
 
   if (!code || !state) {
     return NextResponse.json({ error: "Missing code/state" }, { status: 400 });
   }
 
-  // Must be logged in (ties OAuth result to current session)
-  const supabase = await createSupabaseRouteHandlerClient();
-  const { data } = await supabase.auth.getUser();
-  if (!data?.user) return NextResponse.redirect(new URL("/login", req.url));
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI;
+  const stateSecret = process.env.OAUTH_STATE_SECRET;
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
 
-  // Validate state (and get businessId)
-  let stateData: { businessId: string; userId: string; ts: number };
+  if (!clientId || !clientSecret || !redirectUri || !stateSecret) {
+    return NextResponse.json(
+      {
+        error: "Missing env vars",
+        details: {
+          GOOGLE_CLIENT_ID: !!clientId,
+          GOOGLE_CLIENT_SECRET: !!clientSecret,
+          GOOGLE_REDIRECT_URI: !!redirectUri,
+          OAUTH_STATE_SECRET: !!stateSecret,
+        },
+      },
+      { status: 500 }
+    );
+  }
+
+  // Decode and verify state
+  let decoded: { payloadJson: string; sig: string };
   try {
-    stateData = verifyAndReadState(state);
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Invalid state" }, { status: 400 });
+    decoded = JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
+  } catch {
+    return NextResponse.json({ error: "Invalid state" }, { status: 400 });
   }
 
-  // Ensure the same user who started the flow is completing it
-  if (stateData.userId !== data.user.id) {
-    return NextResponse.json({ error: "User mismatch" }, { status: 403 });
+  const expectedSig = signState(decoded.payloadJson, stateSecret);
+  if (decoded.sig !== expectedSig) {
+    return NextResponse.json(
+      { error: "State signature mismatch" },
+      { status: 400 }
+    );
   }
 
-  // Ensure business ownership
-  const business = await prisma.business.findFirst({
-    where: { id: stateData.businessId, ownerUserId: data.user.id },
-    select: { id: true },
-  });
-  if (!business) return NextResponse.json({ error: "Business not found" }, { status: 404 });
+  const payload = JSON.parse(decoded.payloadJson) as {
+    businessId: string;
+    userId: string;
+    ts: number;
+  };
+
+  // reject old states (10 min)
+  if (Date.now() - payload.ts > 10 * 60 * 1000) {
+    return NextResponse.json({ error: "State expired" }, { status: 400 });
+  }
+
+  // Auth user must match state userId
+  const supabase = await createSupabaseServerClient();
+  const { data: auth } = await supabase.auth.getUser();
+
+  if (!auth?.user || auth.user.id !== payload.userId) {
+    return NextResponse.json(
+      { error: "Unauthorized user for this state" },
+      { status: 401 }
+    );
+  }
 
   // Exchange code for tokens
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -70,14 +81,14 @@ export async function GET(req: Request) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       code,
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),
   });
 
-  const tokenJson = await tokenRes.json().catch(() => ({} as any));
+  const tokenJson = await tokenRes.json();
   if (!tokenRes.ok) {
     return NextResponse.json(
       { error: "Token exchange failed", details: tokenJson },
@@ -85,45 +96,48 @@ export async function GET(req: Request) {
     );
   }
 
-  const accessToken = tokenJson.access_token as string | undefined;
-  const refreshToken = tokenJson.refresh_token as string | undefined;
-  const expiresIn = Number(tokenJson.expires_in ?? 0);
-  const scope = tokenJson.scope as string | undefined;
+  const access_token = tokenJson.access_token as string | undefined;
+  const refresh_token = tokenJson.refresh_token as string | undefined;
+  const expires_in = tokenJson.expires_in as number | undefined;
 
-  if (!accessToken) {
-    return NextResponse.json({ error: "Missing access_token from Google" }, { status: 400 });
-  }
-  if (!refreshToken) {
-    // If user already granted before and Google didn't return refresh_token,
-    // you can keep the existing one if present. We'll enforce it for now.
+  const expiry_date =
+    typeof expires_in === "number"
+      ? new Date(Date.now() + expires_in * 1000)
+      : null;
+
+  // IMPORTANT:
+  // Google often only returns refresh_token the *first* time.
+  // If it's missing, keep the existing refresh_token.
+  const { data: existing } = await supabaseAdmin
+    .from("google_accounts")
+    .select("refresh_token")
+    .eq("user_id", auth.user.id)
+    .maybeSingle();
+
+  const finalRefreshToken = refresh_token ?? existing?.refresh_token ?? null;
+
+  // Upsert with explicit conflict target
+  const { error: upsertError } = await supabaseAdmin
+    .from("google_accounts")
+    .upsert(
+      {
+        user_id: auth.user.id,
+        access_token: access_token ?? null,
+        refresh_token: finalRefreshToken,
+        expiry_date: expiry_date?.toISOString() ?? null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
+
+  if (upsertError) {
     return NextResponse.json(
-      { error: "Missing refresh_token. Try again with prompt=consent (already set)." },
-      { status: 400 }
+      { error: "Failed to save tokens", details: upsertError },
+      { status: 500 }
     );
   }
 
-  const expiryDate = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
-
-  // Store encrypted tokens in GoogleOAuthConnection (businessId is unique)
-  await prisma.googleOAuthConnection.upsert({
-    where: { businessId: stateData.businessId },
-    create: {
-      businessId: stateData.businessId,
-      encryptedAccessToken: encryptString(accessToken),
-      encryptedRefreshToken: encryptString(refreshToken),
-      expiryDate,
-      scopes: scope ?? null,
-    },
-    update: {
-      encryptedAccessToken: encryptString(accessToken),
-      encryptedRefreshToken: encryptString(refreshToken),
-      expiryDate,
-      scopes: scope ?? null,
-    },
-  });
-
-  // ✅ Redirect back to the *business* page (no generic /dashboard/google anymore)
   return NextResponse.redirect(
-    new URL(`/dashboard/businesses/${stateData.businessId}?connected=1`, req.url)
+    new URL(`/dashboard/businesses/${payload.businessId}?connected=1`, appUrl)
   );
 }
