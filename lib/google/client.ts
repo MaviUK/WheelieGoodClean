@@ -1,5 +1,5 @@
 import { OAuth2Client } from "google-auth-library";
-import { prisma } from "@/lib/prisma";
+
 
 export async function getGoogleClient(workspaceId: string) {
   const conn = await prisma.googleConnection.findUnique({ where: { workspaceId } });

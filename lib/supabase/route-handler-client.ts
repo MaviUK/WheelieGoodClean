@@ -1,9 +1,7 @@
-// lib/supabase/server.ts
-import "server-only";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-export async function createSupabaseServerClient() {
+export async function createSupabaseRouteHandlerClient() {
   const cookieStore = await cookies();
 
   return createServerClient(
@@ -14,10 +12,11 @@ export async function createSupabaseServerClient() {
         getAll() {
           return cookieStore.getAll();
         },
-        // IMPORTANT:
-        // During Server Component renders, Next disallows setting cookies.
-        // So we no-op setters here. Cookie writes must happen in Route Handlers.
-        setAll() {},
+        setAll(cookiesToSet) {
+          for (const { name, value, options } of cookiesToSet) {
+            cookieStore.set(name, value, options);
+          }
+        },
       },
     }
   );

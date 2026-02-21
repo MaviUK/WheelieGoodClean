@@ -1,21 +1,66 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model GoogleAccount {
-  id           String   @id @default(cuid())
-  userId       String   @unique
-  email        String?
-  accessToken  String?
-  refreshToken String?
-  scope        String?
-  tokenType    String?
-  expiryDate   DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+model Business {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+
+  // simplest multi-tenant start (we’ll upgrade to Workspace later)
+  ownerUserId String
+  name        String
+
+  // Google identifiers (set after the user chooses a location)
+  googleAccountName  String?
+  googleLocationName String?
+
+  googleConnection GoogleOAuthConnection?
+  reviews          Review[]
+
+  @@index([ownerUserId])
+}
+
+model GoogleOAuthConnection {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  businessId String   @unique
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  // Encrypted token fields
+  accessTokenEnc  String
+  refreshTokenEnc String
+  expiryDate      DateTime
+
+  scopes       String?
+  googleUserId String?
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  googleReviewName String
+  reviewerName     String?
+  rating           Int?
+  comment          String?
+  createTime       DateTime?
+  updateTime       DateTime?
+  raw              Json?
+
+  @@unique([businessId, googleReviewName])
+  @@index([businessId, updateTime])
 }

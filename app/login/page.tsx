@@ -1,23 +1,45 @@
 "use client";
 
-import { useState } from "react";
-import { supabase } from "@/lib/supabase/client";
+import { useMemo, useState } from "react";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
+  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
+    setErrorMsg(null);
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
-        emailRedirectTo: "http://localhost:3000/auth/callback",
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
       },
     });
 
-    if (!error) setSent(true);
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+
+    setSent(true);
+  }
+
+  async function handleGoogleLogin() {
+    setErrorMsg(null);
+
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
+
+    if (error) setErrorMsg(error.message);
   }
 
   if (sent) {
@@ -50,6 +72,16 @@ export default function LoginPage() {
         <button className="mt-4 w-full rounded-xl bg-black py-2 text-white">
           Send magic link
         </button>
+
+        <button
+          type="button"
+          onClick={handleGoogleLogin}
+          className="mt-2 w-full rounded-xl border py-2"
+        >
+          Continue with Google
+        </button>
+
+        {errorMsg && <p className="mt-3 text-sm text-red-600">{errorMsg}</p>}
       </form>
     </div>
   );
