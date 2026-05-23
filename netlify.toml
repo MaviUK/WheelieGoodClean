@@ -1,0 +1,21 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Netlify Scheduled Functions use UTC cron expressions.
+# 07:00 UTC is 08:00 UK time during BST and 07:00 during GMT.
+[functions."sync-morning"]
+  schedule = "0 7 * * *"
+
+# 22:30 UTC is 23:30 UK time during BST and 22:30 during GMT.
+[functions."sync-evening"]
+  schedule = "30 22 * * *"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
