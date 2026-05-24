@@ -4,39 +4,70 @@ function todayFotmobDate() {
   return new Date().toISOString().slice(0, 10).replaceAll('-', '');
 }
 
-async function fotmobFetch(endpoint, params = {}) {
-  // FotMob's unofficial API expects a trailing slash after the endpoint name,
-  // for example /api/matches/?date=YYYYMMDD. Without it, FotMob returns the
-  // public HTML app shell with a 404.
-  const cleanEndpoint = String(endpoint).replace(/^\/+|\/+$/g, '');
-  const url = new URL(`${FOTMOB_BASE_URL}/${cleanEndpoint}/`);
+function makeUrl(path, params = {}) {
+  const url = new URL(path);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') {
       url.searchParams.set(key, value);
     }
   }
+  return url;
+}
 
+async function getText(url) {
   const response = await fetch(url, {
     headers: {
       accept: 'application/json,text/plain,*/*',
       'user-agent': 'Mozilla/5.0 GerballFootballStats/0.1',
+      referer: 'https://www.fotmob.com/',
     },
   });
 
   const text = await response.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    payload = { rawText: text.slice(0, 2000) };
-  }
-
   const contentType = response.headers.get('content-type') || '';
-  if (!response.ok || contentType.includes('text/html')) {
-    throw new Error(`FotMob ${cleanEndpoint} failed with ${response.status}: ${text.slice(0, 300)}`);
+  let json = null;
+
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
   }
 
-  return { url: url.toString(), payload };
+  return {
+    ok: response.ok,
+    status: response.status,
+    contentType,
+    url: url.toString(),
+    json,
+    snippet: text.slice(0, 500),
+  };
+}
+
+async function tryFotmob(endpoint, params = {}) {
+  const cleanEndpoint = String(endpoint).replace(/^\/+|\/+$/g, '');
+  const variants = [
+    makeUrl(`${FOTMOB_BASE_URL}/${cleanEndpoint}`, params),
+    makeUrl(`${FOTMOB_BASE_URL}/${cleanEndpoint}/`, params),
+    makeUrl(`${FOTMOB_BASE_URL}//${cleanEndpoint}/`, params),
+  ];
+
+  const attempts = [];
+  for (const url of variants) {
+    const result = await getText(url);
+    attempts.push({
+      ok: result.ok,
+      status: result.status,
+      contentType: result.contentType,
+      url: result.url,
+      snippet: result.snippet,
+    });
+
+    if (result.ok && result.json && !result.contentType.includes('text/html')) {
+      return { result, attempts };
+    }
+  }
+
+  return { result: null, attempts };
 }
 
 function getMatchesFromPayload(payload) {
@@ -80,52 +111,60 @@ export async function handler(event) {
   const matchId = query.matchId;
   const includeRaw = query.raw === '1';
 
-  try {
-    const matchesResult = await fotmobFetch('matches', { date, ccode3 });
-    const matches = getMatchesFromPayload(matchesResult.payload);
-    const selectedMatchId = matchId || matches.find((match) => match.matchId)?.matchId;
+  const matchesCheck = await tryFotmob('matches', { date, ccode3 });
 
-    let matchResult = null;
-    let matchDetailsResult = null;
-
-    if (selectedMatchId) {
-      matchResult = await fotmobFetch('match', { id: selectedMatchId });
-      matchDetailsResult = await fotmobFetch('matchDetails', { matchId: selectedMatchId });
-    }
-
-    const body = {
-      ok: true,
-      date,
-      ccode3,
-      matchesEndpoint: matchesResult.url,
-      matchCount: matches.length,
-      firstMatches: matches.slice(0, 10),
-      selectedMatchId,
-      matchEndpoint: matchResult?.url || null,
-      matchSummary: matchResult ? summariseMatchPayload(matchResult.payload) : null,
-      matchDetailsEndpoint: matchDetailsResult?.url || null,
-      matchDetailsKeys: matchDetailsResult ? Object.keys(matchDetailsResult.payload || {}) : null,
-      note: 'Use raw=1 to include full JSON payloads for inspection.',
-    };
-
-    if (includeRaw) {
-      body.raw = {
-        matches: matchesResult.payload,
-        match: matchResult?.payload || null,
-        matchDetails: matchDetailsResult?.payload || null,
-      };
-    }
-
+  if (!matchesCheck.result) {
     return {
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body, null, 2),
-    };
-  } catch (error) {
-    return {
-      statusCode: 500,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ok: false, error: error.message }, null, 2),
+      body: JSON.stringify({
+        ok: false,
+        date,
+        ccode3,
+        message: 'FotMob did not return JSON from any tested URL pattern. This may mean the unofficial endpoint is blocked from Netlify or has changed.',
+        attempts: matchesCheck.attempts,
+      }, null, 2),
     };
   }
+
+  const matchesPayload = matchesCheck.result.json;
+  const matches = getMatchesFromPayload(matchesPayload);
+  const selectedMatchId = matchId || matches.find((match) => match.matchId)?.matchId;
+
+  let matchCheck = null;
+  let detailsCheck = null;
+
+  if (selectedMatchId) {
+    matchCheck = await tryFotmob('match', { id: selectedMatchId });
+    detailsCheck = await tryFotmob('matchDetails', { matchId: selectedMatchId });
+  }
+
+  const body = {
+    ok: true,
+    date,
+    ccode3,
+    matchesAttempts: matchesCheck.attempts,
+    matchCount: matches.length,
+    firstMatches: matches.slice(0, 10),
+    selectedMatchId,
+    matchAttempts: matchCheck?.attempts || null,
+    matchSummary: matchCheck?.result?.json ? summariseMatchPayload(matchCheck.result.json) : null,
+    matchDetailsAttempts: detailsCheck?.attempts || null,
+    matchDetailsKeys: detailsCheck?.result?.json ? Object.keys(detailsCheck.result.json || {}) : null,
+    note: 'Use raw=1 to include full JSON payloads for inspection.',
+  };
+
+  if (includeRaw) {
+    body.raw = {
+      matches: matchesPayload,
+      match: matchCheck?.result?.json || null,
+      matchDetails: detailsCheck?.result?.json || null,
+    };
+  }
+
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body, null, 2),
+  };
 }
