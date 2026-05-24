@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 
 const PAGE_SIZE = 250;
+const TABLE_LIMIT = 1200;
 
 function formatDate(value) {
   if (!value) return 'TBC';
@@ -145,6 +146,70 @@ function summariseTeam(teamName, rows) {
   return summary;
 }
 
+function emptyTableRow(team) {
+  return {
+    team,
+    played: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    goalsFor: 0,
+    goalsAgainst: 0,
+    goalDifference: 0,
+    points: 0,
+    form: [],
+  };
+}
+
+function calculateLeagueTable(rows) {
+  const table = new Map();
+
+  function ensure(team) {
+    if (!table.has(team)) table.set(team, emptyTableRow(team));
+    return table.get(team);
+  }
+
+  function applyResult(team, goalsFor, goalsAgainst) {
+    const row = ensure(team);
+    row.played += 1;
+    row.goalsFor += goalsFor;
+    row.goalsAgainst += goalsAgainst;
+    row.goalDifference = row.goalsFor - row.goalsAgainst;
+
+    if (goalsFor > goalsAgainst) {
+      row.wins += 1;
+      row.points += 3;
+      row.form.push('W');
+    } else if (goalsFor < goalsAgainst) {
+      row.losses += 1;
+      row.form.push('L');
+    } else {
+      row.draws += 1;
+      row.points += 1;
+      row.form.push('D');
+    }
+  }
+
+  const completed = [...rows]
+    .filter((match) => match.home_team && match.away_team && match.fthg !== null && match.fthg !== undefined && match.ftag !== null && match.ftag !== undefined)
+    .sort((a, b) => String(a.match_date).localeCompare(String(b.match_date)));
+
+  for (const match of completed) {
+    applyResult(match.home_team, match.fthg, match.ftag);
+    applyResult(match.away_team, match.ftag, match.fthg);
+  }
+
+  return [...table.values()]
+    .sort((a, b) => (
+      b.points - a.points
+      || b.goalDifference - a.goalDifference
+      || b.goalsFor - a.goalsFor
+      || b.wins - a.wins
+      || a.team.localeCompare(b.team)
+    ))
+    .map((row, index) => ({ ...row, rank: index + 1, form: row.form.slice(-5) }));
+}
+
 function StatPill({ label, home, away }) {
   return (
     <div className="stat-pill">
@@ -162,6 +227,17 @@ function MetricCard({ label, value, detail }) {
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
     </div>
+  );
+}
+
+function FormDots({ form }) {
+  if (!form?.length) return <span className="muted">-</span>;
+  return (
+    <span className="form-dots">
+      {form.map((item, index) => (
+        <span className={`form-badge ${item.toLowerCase()}`} key={`${item}-${index}`}>{item}</span>
+      ))}
+    </span>
   );
 }
 
@@ -236,6 +312,72 @@ function MatchDetails({ match, onTeamSelect }) {
   );
 }
 
+function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect }) {
+  const table = useMemo(() => calculateLeagueTable(rows), [rows]);
+  const playedMatches = rows.filter((match) => match.fthg !== null && match.fthg !== undefined).length;
+
+  return (
+    <section className="league-table-card">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">League table</p>
+          <h2>{scope?.divisionName || 'Select a division'} {scope?.seasonLabel ? `· ${scope.seasonLabel}` : ''}</h2>
+        </div>
+        <span>{table.length}</span>
+      </div>
+
+      <p className="muted table-help">
+        {scope
+          ? `Calculated from ${playedMatches} completed imported matches. Change the Division and Season filters to view historic tables.`
+          : 'Choose a division and season, or select a match, to calculate the table.'}
+      </p>
+
+      {loading ? <p className="muted">Loading league table...</p> : null}
+      {error ? <p className="error">{error}</p> : null}
+
+      <div className="table-scroll">
+        <table className="league-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Team</th>
+              <th>P</th>
+              <th>W</th>
+              <th>D</th>
+              <th>L</th>
+              <th>GF</th>
+              <th>GA</th>
+              <th>GD</th>
+              <th>Pts</th>
+              <th>Form</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.map((row) => (
+              <tr key={row.team}>
+                <td>{row.rank}</td>
+                <td>
+                  <button className="table-team-button" type="button" onClick={() => onTeamSelect(row.team)}>{row.team}</button>
+                </td>
+                <td>{row.played}</td>
+                <td>{row.wins}</td>
+                <td>{row.draws}</td>
+                <td>{row.losses}</td>
+                <td>{row.goalsFor}</td>
+                <td>{row.goalsAgainst}</td>
+                <td>{row.goalDifference}</td>
+                <td><strong>{row.points}</strong></td>
+                <td><FormDots form={row.form} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!loading && table.length === 0 ? <p className="muted empty-table-message">No completed matches found for this table yet.</p> : null}
+      </div>
+    </section>
+  );
+}
+
 function TeamPanel({ teamName, rows, loading, error, onClose, onMatchSelect }) {
   if (!teamName) return null;
 
@@ -290,6 +432,9 @@ export default function App() {
   const [teamMatches, setTeamMatches] = useState([]);
   const [teamLoading, setTeamLoading] = useState(false);
   const [teamError, setTeamError] = useState('');
+  const [tableRows, setTableRows] = useState([]);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tableError, setTableError] = useState('');
   const [importRuns, setImportRuns] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -424,6 +569,59 @@ export default function App() {
   }, [metadataRows, filters.country]);
   const seasons = useMemo(() => uniqueOptions(metadataRows, 'season_code', 'season_label').sort((a, b) => b.value.localeCompare(a.value)), [metadataRows]);
 
+  const tableScope = useMemo(() => {
+    if (filters.division !== 'all' && filters.season !== 'all') {
+      const row = metadataRows.find((item) => item.division === filters.division && item.season_code === filters.season);
+      return {
+        division: filters.division,
+        divisionName: row?.division_name || filters.division,
+        season: filters.season,
+        seasonLabel: row?.season_label || filters.season,
+      };
+    }
+
+    if (selectedMatch?.division && selectedMatch?.season_code) {
+      return {
+        division: selectedMatch.division,
+        divisionName: selectedMatch.division_name || selectedMatch.division,
+        season: selectedMatch.season_code,
+        seasonLabel: selectedMatch.season_label || selectedMatch.season_code,
+      };
+    }
+
+    return null;
+  }, [filters.division, filters.season, metadataRows, selectedMatch]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || !tableScope) {
+      setTableRows([]);
+      return;
+    }
+
+    async function loadLeagueTableRows() {
+      setTableLoading(true);
+      setTableError('');
+
+      const result = await supabase
+        .from('football_data_matches')
+        .select('id,country_name,division,division_name,season_code,season_label,match_date,home_team,away_team,fthg,ftag,ftr')
+        .eq('division', tableScope.division)
+        .eq('season_code', tableScope.season)
+        .order('match_date', { ascending: true })
+        .limit(TABLE_LIMIT);
+
+      if (result.error) {
+        setTableError(result.error.message);
+        setTableRows([]);
+      } else {
+        setTableRows(result.data || []);
+      }
+      setTableLoading(false);
+    }
+
+    loadLeagueTableRows();
+  }, [tableScope]);
+
   const totals = useMemo(() => {
     const goals = matches.reduce((sum, match) => sum + (match.fthg || 0) + (match.ftag || 0), 0);
     const corners = matches.reduce((sum, match) => sum + (match.home_corners || 0) + (match.away_corners || 0), 0);
@@ -477,7 +675,7 @@ export default function App() {
         <div>
           <p className="eyebrow">Gerball Football Stats</p>
           <h1>Football data explorer</h1>
-          <p>Browse the imported football-data.co.uk warehouse: historic results, shots, corners, cards, fouls, odds, betting markets and raw CSV fields stored in Supabase.</p>
+          <p>Browse the imported football-data.co.uk warehouse: historic results, league tables, shots, corners, cards, fouls, odds, betting markets and raw CSV fields stored in Supabase.</p>
         </div>
         <div className="hero-card">
           <span>Rows matching filters</span>
@@ -522,6 +720,14 @@ export default function App() {
         {loading ? <span className="muted">Loading saved data...</span> : null}
         {error ? <span className="error">{error}</span> : null}
       </section>
+
+      <LeagueTablePanel
+        scope={tableScope}
+        rows={tableRows}
+        loading={tableLoading}
+        error={tableError}
+        onTeamSelect={handleTeamSelect}
+      />
 
       <section className="layout-grid">
         <aside className="match-list-card">
