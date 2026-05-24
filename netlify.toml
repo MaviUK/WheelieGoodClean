@@ -15,6 +15,10 @@
 [functions."sync-evening"]
   schedule = "30 22 * * *"
 
+# Refresh football-data.co.uk CSVs daily for the current season.
+[functions."update-football-data"]
+  schedule = "15 6 * * *"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
