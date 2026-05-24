@@ -6,11 +6,34 @@ const BASE_URL = 'https://www.football-data.co.uk/mmz4281';
 export const FOOTBALL_DATA_CURRENT_SEASON = '2526';
 
 export const FOOTBALL_DATA_DIVISIONS = {
-  E0: 'Premier League',
-  E1: 'Championship',
-  E2: 'League One',
-  E3: 'League Two',
-  EC: 'National League',
+  E0: { countryCode: 'ENG', countryName: 'England', divisionName: 'Premier League' },
+  E1: { countryCode: 'ENG', countryName: 'England', divisionName: 'Championship' },
+  E2: { countryCode: 'ENG', countryName: 'England', divisionName: 'League One' },
+  E3: { countryCode: 'ENG', countryName: 'England', divisionName: 'League Two' },
+  EC: { countryCode: 'ENG', countryName: 'England', divisionName: 'National League' },
+
+  SC0: { countryCode: 'SCO', countryName: 'Scotland', divisionName: 'Premiership' },
+  SC1: { countryCode: 'SCO', countryName: 'Scotland', divisionName: 'Championship' },
+  SC2: { countryCode: 'SCO', countryName: 'Scotland', divisionName: 'League One' },
+  SC3: { countryCode: 'SCO', countryName: 'Scotland', divisionName: 'League Two' },
+
+  D1: { countryCode: 'DEU', countryName: 'Germany', divisionName: 'Bundesliga' },
+  D2: { countryCode: 'DEU', countryName: 'Germany', divisionName: '2. Bundesliga' },
+
+  I1: { countryCode: 'ITA', countryName: 'Italy', divisionName: 'Serie A' },
+  I2: { countryCode: 'ITA', countryName: 'Italy', divisionName: 'Serie B' },
+
+  SP1: { countryCode: 'ESP', countryName: 'Spain', divisionName: 'La Liga' },
+  SP2: { countryCode: 'ESP', countryName: 'Spain', divisionName: 'Segunda Division' },
+
+  F1: { countryCode: 'FRA', countryName: 'France', divisionName: 'Ligue 1' },
+  F2: { countryCode: 'FRA', countryName: 'France', divisionName: 'Ligue 2' },
+
+  N1: { countryCode: 'NLD', countryName: 'Netherlands', divisionName: 'Eredivisie' },
+  B1: { countryCode: 'BEL', countryName: 'Belgium', divisionName: 'Jupiler League' },
+  P1: { countryCode: 'PRT', countryName: 'Portugal', divisionName: 'Liga I' },
+  T1: { countryCode: 'TUR', countryName: 'Turkey', divisionName: 'Ligi 1' },
+  G1: { countryCode: 'GRC', countryName: 'Greece', divisionName: 'Ethniki Katigoria' },
 };
 
 const CORE_RESULT_COLUMNS = new Set([
@@ -21,6 +44,14 @@ const CORE_RESULT_COLUMNS = new Set([
 const MATCH_STAT_COLUMNS = new Set([
   'HS', 'AS', 'HST', 'AST', 'HF', 'AF', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR',
 ]);
+
+function getDivisionConfig(division) {
+  return FOOTBALL_DATA_DIVISIONS[division] || {
+    countryCode: 'UNK',
+    countryName: 'Unknown',
+    divisionName: division,
+  };
+}
 
 export function seasonCodeToLabel(code) {
   const start = Number.parseInt(code.slice(0, 2), 10);
@@ -207,11 +238,12 @@ function buildSourceMetadata(row, sourceUrl) {
 }
 
 function csvRowToDbRow({ row, seasonCode, division, sourceUrl }) {
+  const config = getDivisionConfig(division);
   return {
-    country_code: 'ENG',
-    country_name: 'England',
+    country_code: config.countryCode,
+    country_name: config.countryName,
     division,
-    division_name: FOOTBALL_DATA_DIVISIONS[division] || division,
+    division_name: config.divisionName,
     season_code: seasonCode,
     season_label: seasonCodeToLabel(seasonCode),
     match_date: parseDate(row.Date),
@@ -315,7 +347,9 @@ export async function importFootballDataCoUk({
   maxSeasons = 3,
 } = {}) {
   const supabase = getSupabaseAdmin();
-  const divisions = division ? [division] : Object.keys(FOOTBALL_DATA_DIVISIONS);
+  const divisions = division
+    ? String(division).split(',').map((item) => item.trim()).filter(Boolean)
+    : Object.keys(FOOTBALL_DATA_DIVISIONS);
   const seasonCodes = mode === 'historic'
     ? generateSeasonCodes(fromSeason || '9394', toSeason || FOOTBALL_DATA_CURRENT_SEASON).slice(0, Number(maxSeasons) || 3)
     : [season || FOOTBALL_DATA_CURRENT_SEASON];
