@@ -1,11 +1,14 @@
 const FOTMOB_BASE_URL = 'https://www.fotmob.com/api';
 
-function todayFotmobDate() {
+function normaliseDate(value) {
+  if (value && /^\d{8}$/.test(value)) return value;
+  if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value.replaceAll('-', '');
   return new Date().toISOString().slice(0, 10).replaceAll('-', '');
 }
 
-function makeUrl(path, params = {}) {
-  const url = new URL(path);
+function makeUrl(endpoint, params = {}) {
+  const cleanEndpoint = String(endpoint).replace(/^\/+|\/+$/g, '');
+  const url = new URL(`${FOTMOB_BASE_URL}/${cleanEndpoint}`);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') {
       url.searchParams.set(key, value);
@@ -14,7 +17,8 @@ function makeUrl(path, params = {}) {
   return url;
 }
 
-async function getText(url) {
+async function getJson(endpoint, params = {}) {
+  const url = makeUrl(endpoint, params);
   const response = await fetch(url, {
     headers: {
       accept: 'application/json,text/plain,*/*',
@@ -24,7 +28,6 @@ async function getText(url) {
   });
 
   const text = await response.text();
-  const contentType = response.headers.get('content-type') || '';
   let json = null;
 
   try {
@@ -34,131 +37,156 @@ async function getText(url) {
   }
 
   return {
-    ok: response.ok,
+    ok: response.ok && Boolean(json),
     status: response.status,
-    contentType,
+    contentType: response.headers.get('content-type') || '',
     url: url.toString(),
     json,
     snippet: text.slice(0, 500),
   };
 }
 
-async function tryFotmob(endpoint, params = {}) {
-  const cleanEndpoint = String(endpoint).replace(/^\/+|\/+$/g, '');
-  const variants = [
-    makeUrl(`${FOTMOB_BASE_URL}/${cleanEndpoint}`, params),
-    makeUrl(`${FOTMOB_BASE_URL}/${cleanEndpoint}/`, params),
-    makeUrl(`${FOTMOB_BASE_URL}//${cleanEndpoint}/`, params),
-  ];
+function interestingPaths(value, path = '', found = new Set()) {
+  if (!value || typeof value !== 'object') return found;
 
-  const attempts = [];
-  for (const url of variants) {
-    const result = await getText(url);
-    attempts.push({
-      ok: result.ok,
-      status: result.status,
-      contentType: result.contentType,
-      url: result.url,
-      snippet: result.snippet,
-    });
-
-    if (result.ok && result.json && !result.contentType.includes('text/html')) {
-      return { result, attempts };
-    }
+  if (Array.isArray(value)) {
+    value.slice(0, 3).forEach((item, index) => interestingPaths(item, `${path}[${index}]`, found));
+    return found;
   }
 
-  return { result: null, attempts };
+  const interesting = /shot|xg|corner|card|goal|event|lineup|stat|possession|foul|substitution|player|table|standing|fixture|match/i;
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = path ? `${path}.${key}` : key;
+    if (interesting.test(key)) found.add(childPath);
+    if (child && typeof child === 'object') interestingPaths(child, childPath, found);
+  }
+  return found;
 }
 
-function getMatchesFromPayload(payload) {
-  const leagues = Array.isArray(payload?.leagues) ? payload.leagues : [];
-  return leagues.flatMap((league) => {
-    const matches = Array.isArray(league.matches) ? league.matches : [];
-    return matches.map((match) => ({
-      leagueId: league.id,
-      leagueName: league.name,
-      matchId: match.id,
-      home: match.home?.name || match.home?.shortName,
-      away: match.away?.name || match.away?.shortName,
-      status: match.status?.finished ? 'finished' : match.status?.started ? 'started' : 'scheduled',
-      rawKeys: Object.keys(match),
-    }));
+function summarisePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return {
+    topLevelKeys: Object.keys(payload).sort(),
+    interestingPaths: [...interestingPaths(payload)].slice(0, 80),
+  };
+}
+
+function flattenFixtures(fixturesPayload) {
+  const values = [];
+
+  function walk(value) {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+
+    const possibleId = value.id || value.matchId || value.fixtureId;
+    const hasTeams = value.home || value.away || value.homeTeam || value.awayTeam || value.homeName || value.awayName;
+    if (possibleId && hasTeams) values.push(value);
+
+    Object.values(value).forEach(walk);
+  }
+
+  walk(fixturesPayload);
+  const seen = new Set();
+  return values.filter((item) => {
+    const id = item.id || item.matchId || item.fixtureId;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
   });
 }
 
-function summariseMatchPayload(payload) {
+function summariseMatchCandidate(match) {
+  if (!match) return null;
   return {
-    topLevelKeys: Object.keys(payload || {}),
-    hasContent: Boolean(payload?.content),
-    contentKeys: Object.keys(payload?.content || {}),
-    hasGeneral: Boolean(payload?.general),
-    generalKeys: Object.keys(payload?.general || {}),
-    hasHeader: Boolean(payload?.header),
-    headerKeys: Object.keys(payload?.header || {}),
-    hasStats: Boolean(payload?.content?.stats),
-    statsKeys: Object.keys(payload?.content?.stats || {}),
-    hasShotmap: Boolean(payload?.content?.shotmap),
-    shotmapKeys: Object.keys(payload?.content?.shotmap || {}),
-    hasLineup: Boolean(payload?.content?.lineup),
-    lineupKeys: Object.keys(payload?.content?.lineup || {}),
+    id: match.id || match.matchId || match.fixtureId,
+    home: match.home?.name || match.homeName || match.homeTeam?.name || match.home?.shortName,
+    away: match.away?.name || match.awayName || match.awayTeam?.name || match.away?.shortName,
+    score: match.scoreStr || match.status?.scoreStr || match.score,
+    status: match.status?.reason?.short || match.status?.short || match.status,
+    time: match.status?.utcTime || match.time || match.startTime,
+    keys: Object.keys(match).sort(),
+  };
+}
+
+function summariseMatchDetails(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const content = payload.content || {};
+  const shotmap = content.shotmap || payload.shotmap || {};
+  const stats = content.stats || payload.stats || null;
+  const lineup = content.lineup || content.lineups || payload.lineup || payload.lineups || null;
+  const facts = content.matchFacts || payload.matchFacts || null;
+
+  return {
+    topLevelKeys: Object.keys(payload).sort(),
+    contentKeys: Object.keys(content).sort(),
+    interestingPaths: [...interestingPaths(payload)].slice(0, 120),
+    hasStats: Boolean(stats),
+    hasShotmap: Boolean(shotmap.shots || shotmap.length || Object.keys(shotmap).length),
+    shotCount: Array.isArray(shotmap.shots) ? shotmap.shots.length : null,
+    hasLineup: Boolean(lineup),
+    hasMatchFacts: Boolean(facts),
+    sampleShot: Array.isArray(shotmap.shots) ? shotmap.shots[0] : null,
+    statsShape: stats && typeof stats === 'object' ? Object.keys(stats).sort() : null,
   };
 }
 
 export async function handler(event) {
   const query = event.queryStringParameters || {};
-  const date = query.date || todayFotmobDate();
-  const ccode3 = query.ccode3 || 'ENG';
+  const date = normaliseDate(query.date);
+  const leagueId = query.leagueId || '47';
+  const season = query.season || '2025/2026';
   const matchId = query.matchId;
   const includeRaw = query.raw === '1';
 
-  const matchesCheck = await tryFotmob('matches', { date, ccode3 });
+  const allLeagues = await getJson('allLeagues');
+  const matches = await getJson('matches', { date, timezone: 'Europe/London', ccode3: 'ENG' });
+  const league = await getJson('leagues', { id: leagueId });
+  const fixtures = await getJson('fixtures', { id: leagueId, season });
+  const table = await getJson('tltable', { leagueId });
 
-  if (!matchesCheck.result) {
-    return {
-      statusCode: 200,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        ok: false,
-        date,
-        ccode3,
-        message: 'FotMob did not return JSON from any tested URL pattern. This may mean the unofficial endpoint is blocked from Netlify or has changed.',
-        attempts: matchesCheck.attempts,
-      }, null, 2),
-    };
-  }
+  const fixtureCandidates = fixtures.ok ? flattenFixtures(fixtures.json) : [];
+  const selectedMatchId = matchId || fixtureCandidates.find((item) => item.id || item.matchId || item.fixtureId)?.id || fixtureCandidates.find((item) => item.id || item.matchId || item.fixtureId)?.matchId;
 
-  const matchesPayload = matchesCheck.result.json;
-  const matches = getMatchesFromPayload(matchesPayload);
-  const selectedMatchId = matchId || matches.find((match) => match.matchId)?.matchId;
-
-  let matchCheck = null;
-  let detailsCheck = null;
-
-  if (selectedMatchId) {
-    matchCheck = await tryFotmob('match', { id: selectedMatchId });
-    detailsCheck = await tryFotmob('matchDetails', { matchId: selectedMatchId });
-  }
+  const match = selectedMatchId ? await getJson('match', { id: selectedMatchId }) : null;
+  const matchDetails = selectedMatchId ? await getJson('matchDetails', { matchId: selectedMatchId }) : null;
 
   const body = {
-    ok: true,
-    date,
-    ccode3,
-    matchesAttempts: matchesCheck.attempts,
-    matchCount: matches.length,
-    firstMatches: matches.slice(0, 10),
-    selectedMatchId,
-    matchAttempts: matchCheck?.attempts || null,
-    matchSummary: matchCheck?.result?.json ? summariseMatchPayload(matchCheck.result.json) : null,
-    matchDetailsAttempts: detailsCheck?.attempts || null,
-    matchDetailsKeys: detailsCheck?.result?.json ? Object.keys(detailsCheck.result.json || {}) : null,
-    note: 'Use raw=1 to include full JSON payloads for inspection.',
+    ok: Boolean(allLeagues.ok || league.ok || fixtures.ok || table.ok || matches.ok),
+    note: 'FotMob is unofficial. This test checks which endpoints still return JSON from Netlify.',
+    request: { date, leagueId, season, selectedMatchId },
+    endpointStatus: {
+      allLeagues: { ok: allLeagues.ok, status: allLeagues.status, url: allLeagues.url, contentType: allLeagues.contentType },
+      matchesByDate: { ok: matches.ok, status: matches.status, url: matches.url, contentType: matches.contentType, snippet: matches.ok ? undefined : matches.snippet },
+      league: { ok: league.ok, status: league.status, url: league.url, contentType: league.contentType },
+      fixtures: { ok: fixtures.ok, status: fixtures.status, url: fixtures.url, contentType: fixtures.contentType },
+      table: { ok: table.ok, status: table.status, url: table.url, contentType: table.contentType },
+      match: match ? { ok: match.ok, status: match.status, url: match.url, contentType: match.contentType } : null,
+      matchDetails: matchDetails ? { ok: matchDetails.ok, status: matchDetails.status, url: matchDetails.url, contentType: matchDetails.contentType } : null,
+    },
+    summaries: {
+      allLeagues: allLeagues.ok ? summarisePayload(allLeagues.json) : null,
+      league: league.ok ? summarisePayload(league.json) : null,
+      fixtures: fixtures.ok ? summarisePayload(fixtures.json) : null,
+      table: table.ok ? summarisePayload(table.json) : null,
+      fixtureCount: fixtureCandidates.length,
+      firstTenFixtures: fixtureCandidates.slice(0, 10).map(summariseMatchCandidate),
+      match: match?.ok ? summariseMatchDetails(match.json) : null,
+      matchDetails: matchDetails?.ok ? summarisePayload(matchDetails.json) : null,
+    },
   };
 
   if (includeRaw) {
     body.raw = {
-      matches: matchesPayload,
-      match: matchCheck?.result?.json || null,
-      matchDetails: detailsCheck?.result?.json || null,
+      allLeagues: allLeagues.ok ? allLeagues.json : null,
+      matches: matches.ok ? matches.json : null,
+      league: league.ok ? league.json : null,
+      fixtures: fixtures.ok ? fixtures.json : null,
+      table: table.ok ? table.json : null,
+      match: match?.ok ? match.json : null,
+      matchDetails: matchDetails?.ok ? matchDetails.json : null,
     };
   }
 
