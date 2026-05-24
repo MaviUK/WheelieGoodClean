@@ -1,0 +1,97 @@
+.league-table-card {
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  margin-bottom: 18px;
+  padding: 20px;
+}
+
+.table-help {
+  margin: -4px 0 14px;
+}
+
+.table-scroll {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: white;
+}
+
+.league-table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+}
+
+.league-table th,
+.league-table td {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  padding: 10px 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.league-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.league-table th:nth-child(2),
+.league-table td:nth-child(2) {
+  text-align: left;
+}
+
+.league-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.table-team-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--green-900);
+  cursor: pointer;
+  font-weight: 950;
+  text-align: left;
+}
+
+.table-team-button:hover {
+  color: var(--pink);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.form-dots {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.league-table .form-badge {
+  width: 26px;
+  height: 26px;
+  font-size: 0.75rem;
+}
+
+.empty-table-message {
+  margin: 0;
+  padding: 16px;
+}
+
+@media (max-width: 620px) {
+  .league-table-card {
+    border-radius: 20px;
+    padding: 14px;
+  }
+}
