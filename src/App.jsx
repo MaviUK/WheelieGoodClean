@@ -1,145 +1,147 @@
 import { useEffect, useMemo, useState } from 'react';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 
+const PAGE_SIZE = 250;
+
 function formatDate(value) {
   if (!value) return 'TBC';
   return new Intl.DateTimeFormat('en-GB', {
     weekday: 'short',
     day: '2-digit',
     month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
+    year: 'numeric',
+  }).format(new Date(`${value}T12:00:00`));
 }
 
-function scoreText(fixture) {
-  if (fixture.home_goals === null || fixture.home_goals === undefined) return 'vs';
-  return `${fixture.home_goals} - ${fixture.away_goals}`;
+function scoreText(match) {
+  if (match?.fthg === null || match?.fthg === undefined) return 'vs';
+  return `${match.fthg} - ${match.ftag}`;
 }
 
-function isComplete(status) {
-  return ['FT', 'AET', 'PEN'].includes(status);
+function resultLabel(result) {
+  if (result === 'H') return 'Home win';
+  if (result === 'A') return 'Away win';
+  if (result === 'D') return 'Draw';
+  return result || 'TBC';
+}
+
+function numberOrDash(value) {
+  return value === null || value === undefined || value === '' ? '-' : value;
+}
+
+function uniqueOptions(rows, key, labelKey = key) {
+  const map = new Map();
+  for (const row of rows) {
+    const value = row[key];
+    if (value === null || value === undefined || value === '') continue;
+    if (!map.has(value)) map.set(value, row[labelKey] || value);
+  }
+  return [...map.entries()]
+    .map(([value, label]) => ({ value: String(value), label: String(label) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function StatPill({ label, home, away }) {
   return (
     <div className="stat-pill">
       <span>{label}</span>
-      <strong>{home ?? '-'}</strong>
-      <em>{away ?? '-'}</em>
+      <strong>{numberOrDash(home)}</strong>
+      <em>{numberOrDash(away)}</em>
     </div>
   );
 }
 
-function MatchDetails({ fixture }) {
-  const [events, setEvents] = useState([]);
-  const [stats, setStats] = useState([]);
-  const [lineups, setLineups] = useState([]);
-  const [loading, setLoading] = useState(false);
+function MetricCard({ label, value, detail }) {
+  return (
+    <div className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
 
-  useEffect(() => {
-    if (!fixture?.api_fixture_id || !supabase) return;
+function JsonPreview({ title, data }) {
+  const entries = data && typeof data === 'object' ? Object.entries(data) : [];
+  if (!entries.length) return null;
 
-    async function loadDetails() {
-      setLoading(true);
-      const [eventsResult, statsResult, lineupsResult] = await Promise.all([
-        supabase
-          .from('fixture_events')
-          .select('*')
-          .eq('api_fixture_id', fixture.api_fixture_id)
-          .order('time_elapsed', { ascending: true }),
-        supabase
-          .from('fixture_statistics')
-          .select('*')
-          .eq('api_fixture_id', fixture.api_fixture_id),
-        supabase
-          .from('fixture_lineups')
-          .select('*')
-          .eq('api_fixture_id', fixture.api_fixture_id),
-      ]);
+  return (
+    <div className="json-preview">
+      <h4>{title}</h4>
+      <div className="json-grid">
+        {entries.slice(0, 18).map(([key, value]) => (
+          <div key={key}>
+            <span>{key}</span>
+            <strong>{typeof value === 'object' ? JSON.stringify(value) : numberOrDash(value)}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
-      setEvents(eventsResult.data || []);
-      setStats(statsResult.data || []);
-      setLineups(lineupsResult.data || []);
-      setLoading(false);
-    }
+function MatchDetails({ match }) {
+  if (!match) return <div className="empty-panel">Select a match to view shots, corners, cards, odds and raw imported fields.</div>;
 
-    loadDetails();
-  }, [fixture]);
-
-  const homeStats = stats.find((row) => row.team_id === fixture?.home_team_id) || {};
-  const awayStats = stats.find((row) => row.team_id === fixture?.away_team_id) || {};
-
-  if (!fixture) return <div className="empty-panel">Select a match to view details.</div>;
+  const bettingSummary = match.betting_odds?.summary || {};
+  const allOdds = match.betting_odds?.all || {};
+  const raw = match.raw || {};
 
   return (
     <section className="details-card">
       <div className="details-header">
         <div>
-          <p className="eyebrow">{fixture.league_name} · {fixture.league_round}</p>
-          <h2>{fixture.home_team_name} {scoreText(fixture)} {fixture.away_team_name}</h2>
-          <p>{formatDate(fixture.kickoff_at)} · {fixture.status_long || fixture.status_short || 'Scheduled'}</p>
+          <p className="eyebrow">{match.country_name || 'Football-data.co.uk'} · {match.division_name || match.division} · {match.season_label}</p>
+          <h2>{match.home_team} <span>{scoreText(match)}</span> {match.away_team}</h2>
+          <p>{formatDate(match.match_date)} · {resultLabel(match.ftr)}{match.referee ? ` · Referee: ${match.referee}` : ''}</p>
         </div>
       </div>
 
-      {loading ? <p className="muted">Loading match details...</p> : null}
-
       <div className="stats-grid">
-        <StatPill label="Shots" home={homeStats.total_shots} away={awayStats.total_shots} />
-        <StatPill label="On target" home={homeStats.shots_on_goal} away={awayStats.shots_on_goal} />
-        <StatPill label="Corners" home={homeStats.corner_kicks} away={awayStats.corner_kicks} />
-        <StatPill label="Possession" home={homeStats.ball_possession} away={awayStats.ball_possession} />
-        <StatPill label="Yellow cards" home={homeStats.yellow_cards} away={awayStats.yellow_cards} />
-        <StatPill label="Red cards" home={homeStats.red_cards} away={awayStats.red_cards} />
+        <StatPill label="Shots" home={match.home_shots} away={match.away_shots} />
+        <StatPill label="On target" home={match.home_shots_target} away={match.away_shots_target} />
+        <StatPill label="Corners" home={match.home_corners} away={match.away_corners} />
+        <StatPill label="Fouls" home={match.home_fouls} away={match.away_fouls} />
+        <StatPill label="Yellow cards" home={match.home_yellow} away={match.away_yellow} />
+        <StatPill label="Red cards" home={match.home_red} away={match.away_red} />
+      </div>
+
+      <div className="odds-panel">
+        <h3>Betting odds summary</h3>
+        <div className="odds-grid">
+          <MetricCard label="Avg home" value={numberOrDash(bettingSummary.average?.home ?? match.avg_home_odds)} />
+          <MetricCard label="Avg draw" value={numberOrDash(bettingSummary.average?.draw ?? match.avg_draw_odds)} />
+          <MetricCard label="Avg away" value={numberOrDash(bettingSummary.average?.away ?? match.avg_away_odds)} />
+          <MetricCard label="Max home" value={numberOrDash(bettingSummary.maximum?.home ?? match.max_home_odds)} />
+          <MetricCard label="Max draw" value={numberOrDash(bettingSummary.maximum?.draw ?? match.max_draw_odds)} />
+          <MetricCard label="Max away" value={numberOrDash(bettingSummary.maximum?.away ?? match.max_away_odds)} />
+          <MetricCard label="Avg over 2.5" value={numberOrDash(bettingSummary.average?.over_25 ?? match.avg_over_25)} />
+          <MetricCard label="Avg under 2.5" value={numberOrDash(bettingSummary.average?.under_25 ?? match.avg_under_25)} />
+        </div>
       </div>
 
       <div className="two-column-details">
-        <div>
-          <h3>Timeline</h3>
-          {events.length === 0 ? (
-            <p className="muted">No event timeline saved yet.</p>
-          ) : (
-            <div className="timeline">
-              {events.map((event) => (
-                <div className="timeline-row" key={event.id}>
-                  <span>{event.time_elapsed}{event.time_extra ? `+${event.time_extra}` : ''}'</span>
-                  <strong>{event.event_type}</strong>
-                  <p>{event.team_name} · {event.player_name || 'Unknown'} · {event.detail}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div>
-          <h3>Lineups</h3>
-          {lineups.length === 0 ? (
-            <p className="muted">No lineup data saved yet.</p>
-          ) : (
-            <div className="lineups">
-              {lineups.map((lineup) => (
-                <div className="lineup-card" key={lineup.id}>
-                  <strong>{lineup.team_name}</strong>
-                  <span>{lineup.formation || 'Formation TBC'}</span>
-                  <small>{lineup.start_xi?.length || 0} starters · {lineup.substitutes?.length || 0} subs</small>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <JsonPreview title="All saved odds fields" data={allOdds} />
+        <JsonPreview title="Raw imported CSV row" data={raw} />
       </div>
     </section>
   );
 }
 
 export default function App() {
-  const [leagues, setLeagues] = useState([]);
-  const [selectedLeague, setSelectedLeague] = useState('all');
-  const [fixtures, setFixtures] = useState([]);
-  const [selectedFixture, setSelectedFixture] = useState(null);
-  const [syncRuns, setSyncRuns] = useState([]);
+  const [metadataRows, setMetadataRows] = useState([]);
+  const [matches, setMatches] = useState([]);
+  const [selectedMatch, setSelectedMatch] = useState(null);
+  const [importRuns, setImportRuns] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [filters, setFilters] = useState({
+    country: 'all',
+    division: 'all',
+    season: 'all',
+    team: '',
+  });
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) {
@@ -147,58 +149,95 @@ export default function App() {
       return;
     }
 
-    async function loadInitialData() {
+    async function loadMetadata() {
+      const [metaResult, runResult] = await Promise.all([
+        supabase
+          .from('football_data_matches')
+          .select('country_code, country_name, division, division_name, season_code, season_label, home_team, away_team')
+          .order('match_date', { ascending: false })
+          .limit(10000),
+        supabase
+          .from('football_data_import_runs')
+          .select('mode, status, started_at, finished_at, seasons, divisions, rows_imported, files_imported, files_tried')
+          .order('started_at', { ascending: false })
+          .limit(8),
+      ]);
+
+      if (metaResult.error) setError(metaResult.error.message);
+      setMetadataRows(metaResult.data || []);
+      setImportRuns(runResult.data || []);
+    }
+
+    loadMetadata();
+  }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    async function loadMatches() {
       setLoading(true);
       setError('');
 
-      const today = new Date();
-      const start = new Date(today);
-      start.setUTCDate(start.getUTCDate() - 2);
-      const end = new Date(today);
-      end.setUTCDate(end.getUTCDate() + 7);
+      let query = supabase
+        .from('football_data_matches')
+        .select('*', { count: 'exact' })
+        .order('match_date', { ascending: false })
+        .limit(PAGE_SIZE);
 
-      const [leagueResult, fixtureResult, runResult] = await Promise.all([
-        supabase.from('tracked_leagues').select('*').eq('is_active', true).order('priority'),
-        supabase
-          .from('fixtures')
-          .select('*')
-          .gte('kickoff_at', start.toISOString())
-          .lte('kickoff_at', end.toISOString())
-          .order('kickoff_at', { ascending: true })
-          .limit(200),
-        supabase
-          .from('sync_runs')
-          .select('mode, started_at, finished_at, status, leagues_processed, fixtures_seen, fixtures_detailed, api_calls, error')
-          .order('started_at', { ascending: false })
-          .limit(5),
-      ]);
+      if (filters.country !== 'all') query = query.eq('country_code', filters.country);
+      if (filters.division !== 'all') query = query.eq('division', filters.division);
+      if (filters.season !== 'all') query = query.eq('season_code', filters.season);
+      if (filters.team.trim()) {
+        const term = filters.team.trim().replace(/[%_]/g, '');
+        query = query.or(`home_team.ilike.%${term}%,away_team.ilike.%${term}%`);
+      }
 
-      if (leagueResult.error) setError(leagueResult.error.message);
-      if (fixtureResult.error) setError(fixtureResult.error.message);
-
-      setLeagues(leagueResult.data || []);
-      setFixtures(fixtureResult.data || []);
-      setSyncRuns(runResult.data || []);
-      setSelectedFixture((fixtureResult.data || [])[0] || null);
+      const result = await query;
+      if (result.error) {
+        setError(result.error.message);
+        setMatches([]);
+        setSelectedMatch(null);
+        setTotalCount(0);
+      } else {
+        setMatches(result.data || []);
+        setSelectedMatch((result.data || [])[0] || null);
+        setTotalCount(result.count || 0);
+      }
       setLoading(false);
     }
 
-    loadInitialData();
-  }, []);
+    loadMatches();
+  }, [filters]);
 
-  const filteredFixtures = useMemo(() => {
-    if (selectedLeague === 'all') return fixtures;
-    return fixtures.filter((fixture) => String(fixture.api_league_id) === selectedLeague);
-  }, [fixtures, selectedLeague]);
+  const countries = useMemo(() => uniqueOptions(metadataRows, 'country_code', 'country_name'), [metadataRows]);
+  const divisions = useMemo(() => {
+    const rows = filters.country === 'all'
+      ? metadataRows
+      : metadataRows.filter((row) => row.country_code === filters.country);
+    return uniqueOptions(rows, 'division', 'division_name');
+  }, [metadataRows, filters.country]);
+  const seasons = useMemo(() => uniqueOptions(metadataRows, 'season_code', 'season_label').sort((a, b) => b.value.localeCompare(a.value)), [metadataRows]);
 
   const totals = useMemo(() => {
-    const completed = filteredFixtures.filter((fixture) => isComplete(fixture.status_short)).length;
+    const goals = matches.reduce((sum, match) => sum + (match.fthg || 0) + (match.ftag || 0), 0);
+    const corners = matches.reduce((sum, match) => sum + (match.home_corners || 0) + (match.away_corners || 0), 0);
+    const cards = matches.reduce((sum, match) => sum + (match.home_yellow || 0) + (match.away_yellow || 0) + (match.home_red || 0) + (match.away_red || 0), 0);
     return {
-      fixtures: filteredFixtures.length,
-      completed,
-      upcoming: filteredFixtures.length - completed,
+      visible: matches.length,
+      total: totalCount,
+      goals,
+      corners,
+      cards,
     };
-  }, [filteredFixtures]);
+  }, [matches, totalCount]);
+
+  function updateFilter(key, value) {
+    setFilters((current) => {
+      const next = { ...current, [key]: value };
+      if (key === 'country') next.division = 'all';
+      return next;
+    });
+  }
 
   if (!isSupabaseConfigured) {
     return (
@@ -217,27 +256,48 @@ export default function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">Gerball Football Stats</p>
-          <h1>Football match data warehouse</h1>
-          <p>Daily API-FOOTBALL syncs into Supabase: fixtures, results, goals, cards, corners, shots, lineups, player stats and raw JSON.</p>
+          <h1>Football data explorer</h1>
+          <p>Browse the imported football-data.co.uk warehouse: historic results, shots, corners, cards, fouls, odds, betting markets and raw CSV fields stored in Supabase.</p>
         </div>
         <div className="hero-card">
-          <span>Fixtures loaded</span>
-          <strong>{totals.fixtures}</strong>
-          <small>{totals.completed} completed · {totals.upcoming} upcoming</small>
+          <span>Rows matching filters</span>
+          <strong>{totals.total.toLocaleString('en-GB')}</strong>
+          <small>Showing latest {totals.visible.toLocaleString('en-GB')} rows</small>
         </div>
       </header>
 
-      <section className="toolbar">
+      <section className="metric-strip">
+        <MetricCard label="Goals in loaded rows" value={totals.goals.toLocaleString('en-GB')} />
+        <MetricCard label="Corners in loaded rows" value={totals.corners.toLocaleString('en-GB')} />
+        <MetricCard label="Cards in loaded rows" value={totals.cards.toLocaleString('en-GB')} />
+        <MetricCard label="Imports shown" value={importRuns.length} />
+      </section>
+
+      <section className="toolbar data-toolbar">
         <label>
-          League
-          <select value={selectedLeague} onChange={(event) => setSelectedLeague(event.target.value)}>
-            <option value="all">All tracked leagues</option>
-            {leagues.map((league) => (
-              <option key={`${league.api_league_id}-${league.season}`} value={league.api_league_id}>
-                {league.name} {league.season}
-              </option>
-            ))}
+          Country
+          <select value={filters.country} onChange={(event) => updateFilter('country', event.target.value)}>
+            <option value="all">All countries</option>
+            {countries.map((country) => <option key={country.value} value={country.value}>{country.label}</option>)}
           </select>
+        </label>
+        <label>
+          Division
+          <select value={filters.division} onChange={(event) => updateFilter('division', event.target.value)}>
+            <option value="all">All divisions</option>
+            {divisions.map((division) => <option key={division.value} value={division.value}>{division.label}</option>)}
+          </select>
+        </label>
+        <label>
+          Season
+          <select value={filters.season} onChange={(event) => updateFilter('season', event.target.value)}>
+            <option value="all">All seasons</option>
+            {seasons.map((season) => <option key={season.value} value={season.value}>{season.label}</option>)}
+          </select>
+        </label>
+        <label>
+          Team search
+          <input value={filters.team} onChange={(event) => updateFilter('team', event.target.value)} placeholder="Arsenal, Celtic, Barcelona..." />
         </label>
         {loading ? <span className="muted">Loading saved data...</span> : null}
         {error ? <span className="error">{error}</span> : null}
@@ -246,43 +306,43 @@ export default function App() {
       <section className="layout-grid">
         <aside className="match-list-card">
           <div className="section-title">
-            <h2>Matches</h2>
-            <span>{filteredFixtures.length}</span>
+            <h2>Imported matches</h2>
+            <span>{matches.length}</span>
           </div>
           <div className="match-list">
-            {filteredFixtures.map((fixture) => (
+            {matches.map((match) => (
               <button
-                className={`match-button ${selectedFixture?.api_fixture_id === fixture.api_fixture_id ? 'active' : ''}`}
-                key={fixture.api_fixture_id}
-                onClick={() => setSelectedFixture(fixture)}
+                className={`match-button ${selectedMatch?.id === match.id ? 'active' : ''}`}
+                key={match.id}
+                onClick={() => setSelectedMatch(match)}
               >
-                <span>{formatDate(fixture.kickoff_at)}</span>
-                <strong>{fixture.home_team_name} <em>{scoreText(fixture)}</em> {fixture.away_team_name}</strong>
-                <small>{fixture.league_name} · {fixture.status_short || 'NS'}</small>
+                <span>{formatDate(match.match_date)} · {match.division_name || match.division} · {match.season_label}</span>
+                <strong>{match.home_team} <em>{scoreText(match)}</em> {match.away_team}</strong>
+                <small>{resultLabel(match.ftr)} · Corners {numberOrDash(match.home_corners)}-{numberOrDash(match.away_corners)} · Shots {numberOrDash(match.home_shots)}-{numberOrDash(match.away_shots)}</small>
               </button>
             ))}
-            {filteredFixtures.length === 0 ? <p className="muted">No fixtures saved yet. Run the manual sync after setup.</p> : null}
+            {matches.length === 0 ? <p className="muted">No imported football-data.co.uk rows match these filters yet.</p> : null}
           </div>
         </aside>
 
-        <MatchDetails fixture={selectedFixture} />
+        <MatchDetails match={selectedMatch} />
       </section>
 
       <section className="sync-card">
         <div className="section-title">
-          <h2>Recent sync runs</h2>
-          <span>{syncRuns.length}</span>
+          <h2>Recent football-data imports</h2>
+          <span>{importRuns.length}</span>
         </div>
         <div className="sync-grid">
-          {syncRuns.map((run) => (
+          {importRuns.map((run) => (
             <div className="sync-run" key={`${run.mode}-${run.started_at}`}>
               <strong>{run.mode} · {run.status}</strong>
               <span>{new Date(run.started_at).toLocaleString('en-GB')}</span>
-              <small>{run.api_calls} API calls · {run.fixtures_seen} fixtures · {run.fixtures_detailed} detailed</small>
-              {run.error ? <p className="error">{run.error}</p> : null}
+              <small>{run.rows_imported?.toLocaleString('en-GB')} rows · {run.files_imported}/{run.files_tried} files</small>
+              <small>{run.divisions?.join(', ')} · {run.seasons?.join(', ')}</small>
             </div>
           ))}
-          {syncRuns.length === 0 ? <p className="muted">No sync history yet.</p> : null}
+          {importRuns.length === 0 ? <p className="muted">No football-data import history yet.</p> : null}
         </div>
       </section>
     </main>
