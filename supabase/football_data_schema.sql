@@ -42,6 +42,9 @@ create table if not exists public.football_data_matches (
   avg_under_25 numeric,
   max_over_25 numeric,
   max_under_25 numeric,
+  match_stats jsonb not null default '{}'::jsonb,
+  betting_odds jsonb not null default '{}'::jsonb,
+  source_columns jsonb not null default '{}'::jsonb,
   source_url text,
   row_hash text,
   raw jsonb not null default '{}'::jsonb,
@@ -50,9 +53,15 @@ create table if not exists public.football_data_matches (
   unique (country_code, division, season_code, match_date, home_team, away_team)
 );
 
+alter table public.football_data_matches add column if not exists match_stats jsonb not null default '{}'::jsonb;
+alter table public.football_data_matches add column if not exists betting_odds jsonb not null default '{}'::jsonb;
+alter table public.football_data_matches add column if not exists source_columns jsonb not null default '{}'::jsonb;
+
 create index if not exists football_data_matches_date_idx on public.football_data_matches (match_date desc);
 create index if not exists football_data_matches_division_idx on public.football_data_matches (division, season_code, match_date desc);
 create index if not exists football_data_matches_teams_idx on public.football_data_matches (home_team, away_team);
+create index if not exists football_data_matches_betting_gin_idx on public.football_data_matches using gin (betting_odds);
+create index if not exists football_data_matches_stats_gin_idx on public.football_data_matches using gin (match_stats);
 
 create table if not exists public.football_data_import_runs (
   id uuid primary key default gen_random_uuid(),
