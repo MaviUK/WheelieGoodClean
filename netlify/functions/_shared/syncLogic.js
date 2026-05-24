@@ -5,6 +5,15 @@ const COMPLETED_STATUSES = new Set(['FT', 'AET', 'PEN']);
 const DETAIL_CHUNK_SIZE = 20;
 const RATE_LIMIT_DELAY_MS = 1250;
 
+// API-FOOTBALL free plans currently allow historic seasons up to 2024.
+// This sample range sits near the end of the 2024/25 European season, so it
+// should return completed matches with useful events/statistics on the free tier.
+const FREE_PLAN_SAMPLE_RANGE = {
+  from: '2025-05-01',
+  to: '2025-05-31',
+  detailCompletedMatches: true,
+};
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isoDateOffset(days) {
@@ -13,13 +22,30 @@ function isoDateOffset(days) {
   return date.toISOString().slice(0, 10);
 }
 
-function getRangeForMode(mode) {
+function isDateString(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || '');
+}
+
+function getRangeForMode(mode, options = {}) {
+  if (isDateString(options.from) && isDateString(options.to)) {
+    return {
+      from: options.from,
+      to: options.to,
+      detailCompletedMatches: true,
+      custom: true,
+    };
+  }
+
+  if (mode === 'sample') {
+    return FREE_PLAN_SAMPLE_RANGE;
+  }
+
   if (mode === 'morning') {
     return { from: isoDateOffset(0), to: isoDateOffset(7), detailCompletedMatches: false };
   }
 
   if (mode === 'backfill') {
-    return { from: isoDateOffset(-30), to: isoDateOffset(0), detailCompletedMatches: true };
+    return { from: '2025-04-01', to: '2025-05-31', detailCompletedMatches: true };
   }
 
   return { from: isoDateOffset(-1), to: isoDateOffset(0), detailCompletedMatches: true };
@@ -273,8 +299,8 @@ async function storeRawResponse(supabase, endpoint, params, payload) {
 }
 
 async function fetchAndStore(supabase, endpoint, params, counters) {
-  const payload = await apiFootballFetch(endpoint, params);
   counters.apiCalls += 1;
+  const payload = await apiFootballFetch(endpoint, params);
   await storeRawResponse(supabase, endpoint, params, payload);
   return payload;
 }
@@ -377,23 +403,26 @@ async function syncLeagueFixtures(supabase, league, range, mode, counters) {
   }
 }
 
-export async function runSync({ mode = 'evening' } = {}) {
+export async function runSync({ mode = 'evening', from, to } = {}) {
   const supabase = getSupabaseAdmin();
-  const range = getRangeForMode(mode);
+  const range = getRangeForMode(mode, { from, to });
   const counters = {
     apiCalls: 0,
     leaguesProcessed: 0,
     fixturesSeen: 0,
     fixturesDetailed: 0,
+    leagueErrors: 0,
   };
 
   const { data: run, error: runError } = await supabase
     .from('sync_runs')
-    .insert({ mode, status: 'running', raw: { range } })
+    .insert({ mode, status: 'running', raw: { range, requested: { mode, from, to } } })
     .select()
     .single();
 
   if (runError) throw new Error(`Could not create sync run: ${runError.message}`);
+
+  const leagueErrors = [];
 
   try {
     const { data: leagues, error: leaguesError } = await supabase
@@ -405,32 +434,54 @@ export async function runSync({ mode = 'evening' } = {}) {
     if (leaguesError) throw new Error(`Could not load tracked leagues: ${leaguesError.message}`);
 
     for (const league of leagues || []) {
-      await syncLeagueFixtures(supabase, league, range, mode, counters);
-      await delay(RATE_LIMIT_DELAY_MS);
+      try {
+        await syncLeagueFixtures(supabase, league, range, mode, counters);
+        await delay(RATE_LIMIT_DELAY_MS);
 
-      // Update standings once per run. This is useful for the dashboard and cheap: 1 call per league.
-      await syncStandings(supabase, league, counters);
-      await delay(RATE_LIMIT_DELAY_MS);
+        // Update standings once per run. This is useful for the dashboard and cheap: 1 call per league.
+        await syncStandings(supabase, league, counters);
+        await delay(RATE_LIMIT_DELAY_MS);
 
-      counters.leaguesProcessed += 1;
+        counters.leaguesProcessed += 1;
+      } catch (error) {
+        counters.leagueErrors += 1;
+        leagueErrors.push({
+          api_league_id: league.api_league_id,
+          season: league.season,
+          name: league.name,
+          error: error.message,
+        });
+        await delay(RATE_LIMIT_DELAY_MS);
+      }
     }
+
+    const status = leagueErrors.length
+      ? counters.leaguesProcessed > 0 ? 'partial_success' : 'failed'
+      : 'success';
 
     const { error: updateError } = await supabase
       .from('sync_runs')
       .update({
-        status: 'success',
+        status,
         finished_at: new Date().toISOString(),
         leagues_processed: counters.leaguesProcessed,
         fixtures_seen: counters.fixturesSeen,
         fixtures_detailed: counters.fixturesDetailed,
         api_calls: counters.apiCalls,
-        raw: { range, counters },
+        error: status === 'failed' ? leagueErrors[0]?.error : null,
+        raw: { range, counters, leagueErrors },
       })
       .eq('id', run.id);
 
     if (updateError) throw new Error(`Could not finish sync run: ${updateError.message}`);
 
-    return { ok: true, mode, range, ...counters };
+    const result = { ok: status !== 'failed', status, mode, range, ...counters, leagueErrors };
+
+    if (status === 'failed') {
+      throw new Error(`All league syncs failed. First error: ${leagueErrors[0]?.error || 'Unknown error'}`);
+    }
+
+    return result;
   } catch (error) {
     await supabase
       .from('sync_runs')
@@ -442,7 +493,7 @@ export async function runSync({ mode = 'evening' } = {}) {
         fixtures_detailed: counters.fixturesDetailed,
         api_calls: counters.apiCalls,
         error: error.message,
-        raw: { range, counters },
+        raw: { range, counters, leagueErrors },
       })
       .eq('id', run.id);
 
