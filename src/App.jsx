@@ -29,6 +29,11 @@ function numberOrDash(value) {
   return value === null || value === undefined || value === '' ? '-' : value;
 }
 
+function average(total, count, decimals = 2) {
+  if (!count) return '-';
+  return (total / count).toFixed(decimals);
+}
+
 function uniqueOptions(rows, key, labelKey = key) {
   const map = new Map();
   for (const row of rows) {
@@ -39,6 +44,105 @@ function uniqueOptions(rows, key, labelKey = key) {
   return [...map.entries()]
     .map(([value, label]) => ({ value: String(value), label: String(label) }))
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function getTeamMatchView(match, teamName) {
+  const isHome = match.home_team === teamName;
+  const forGoals = isHome ? match.fthg : match.ftag;
+  const againstGoals = isHome ? match.ftag : match.fthg;
+  const shotsFor = isHome ? match.home_shots : match.away_shots;
+  const shotsAgainst = isHome ? match.away_shots : match.home_shots;
+  const cornersFor = isHome ? match.home_corners : match.away_corners;
+  const cornersAgainst = isHome ? match.away_corners : match.home_corners;
+  const cardsFor = isHome
+    ? (match.home_yellow || 0) + (match.home_red || 0)
+    : (match.away_yellow || 0) + (match.away_red || 0);
+  const cardsAgainst = isHome
+    ? (match.away_yellow || 0) + (match.away_red || 0)
+    : (match.home_yellow || 0) + (match.home_red || 0);
+  const opponent = isHome ? match.away_team : match.home_team;
+  let result = '-';
+
+  if (forGoals !== null && forGoals !== undefined && againstGoals !== null && againstGoals !== undefined) {
+    if (forGoals > againstGoals) result = 'W';
+    else if (forGoals < againstGoals) result = 'L';
+    else result = 'D';
+  }
+
+  return {
+    isHome,
+    opponent,
+    forGoals,
+    againstGoals,
+    shotsFor,
+    shotsAgainst,
+    cornersFor,
+    cornersAgainst,
+    cardsFor,
+    cardsAgainst,
+    result,
+  };
+}
+
+function summariseTeam(teamName, rows) {
+  const summary = {
+    played: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    home: 0,
+    away: 0,
+    goalsFor: 0,
+    goalsAgainst: 0,
+    shotsFor: 0,
+    shotsAgainst: 0,
+    shotsRows: 0,
+    cornersFor: 0,
+    cornersAgainst: 0,
+    cornerRows: 0,
+    cardsFor: 0,
+    cardsAgainst: 0,
+    recent: [],
+  };
+
+  for (const match of rows) {
+    const view = getTeamMatchView(match, teamName);
+    const hasScore = view.forGoals !== null && view.forGoals !== undefined && view.againstGoals !== null && view.againstGoals !== undefined;
+    if (!hasScore) continue;
+
+    summary.played += 1;
+    if (view.isHome) summary.home += 1;
+    else summary.away += 1;
+
+    if (view.result === 'W') summary.wins += 1;
+    if (view.result === 'D') summary.draws += 1;
+    if (view.result === 'L') summary.losses += 1;
+
+    summary.goalsFor += view.forGoals || 0;
+    summary.goalsAgainst += view.againstGoals || 0;
+
+    if (view.shotsFor !== null && view.shotsFor !== undefined) {
+      summary.shotsFor += view.shotsFor || 0;
+      summary.shotsAgainst += view.shotsAgainst || 0;
+      summary.shotsRows += 1;
+    }
+
+    if (view.cornersFor !== null && view.cornersFor !== undefined) {
+      summary.cornersFor += view.cornersFor || 0;
+      summary.cornersAgainst += view.cornersAgainst || 0;
+      summary.cornerRows += 1;
+    }
+
+    summary.cardsFor += view.cardsFor || 0;
+    summary.cardsAgainst += view.cardsAgainst || 0;
+  }
+
+  summary.recent = rows
+    .filter((match) => match.fthg !== null && match.fthg !== undefined)
+    .slice(0, 10)
+    .map((match) => ({ match, view: getTeamMatchView(match, teamName) }));
+
+  return summary;
 }
 
 function StatPill({ label, home, away }) {
@@ -80,7 +184,7 @@ function JsonPreview({ title, data }) {
   );
 }
 
-function MatchDetails({ match }) {
+function MatchDetails({ match, onTeamSelect }) {
   if (!match) return <div className="empty-panel">Select a match to view shots, corners, cards, odds and raw imported fields.</div>;
 
   const bettingSummary = match.betting_odds?.summary || {};
@@ -92,7 +196,11 @@ function MatchDetails({ match }) {
       <div className="details-header">
         <div>
           <p className="eyebrow">{match.country_name || 'Football-data.co.uk'} · {match.division_name || match.division} · {match.season_label}</p>
-          <h2>{match.home_team} <span>{scoreText(match)}</span> {match.away_team}</h2>
+          <h2 className="match-title">
+            <button className="team-link" type="button" onClick={() => onTeamSelect(match.home_team)}>{match.home_team}</button>
+            <span>{scoreText(match)}</span>
+            <button className="team-link" type="button" onClick={() => onTeamSelect(match.away_team)}>{match.away_team}</button>
+          </h2>
           <p>{formatDate(match.match_date)} · {resultLabel(match.ftr)}{match.referee ? ` · Referee: ${match.referee}` : ''}</p>
         </div>
       </div>
@@ -128,10 +236,60 @@ function MatchDetails({ match }) {
   );
 }
 
+function TeamPanel({ teamName, rows, loading, error, onClose, onMatchSelect }) {
+  if (!teamName) return null;
+
+  const summary = summariseTeam(teamName, rows);
+
+  return (
+    <section className="team-card">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">Team data</p>
+          <h2>{teamName}</h2>
+        </div>
+        <button className="ghost-button" type="button" onClick={onClose}>Close</button>
+      </div>
+
+      {loading ? <p className="muted">Loading team history...</p> : null}
+      {error ? <p className="error">{error}</p> : null}
+
+      <div className="team-metrics">
+        <MetricCard label="Played" value={summary.played} detail={`${summary.home} home · ${summary.away} away`} />
+        <MetricCard label="Record" value={`${summary.wins}-${summary.draws}-${summary.losses}`} detail="W-D-L" />
+        <MetricCard label="Goals" value={`${summary.goalsFor}-${summary.goalsAgainst}`} detail={`${average(summary.goalsFor, summary.played)} scored per game`} />
+        <MetricCard label="Avg corners" value={`${average(summary.cornersFor, summary.cornerRows)}-${average(summary.cornersAgainst, summary.cornerRows)}`} detail="For-against" />
+        <MetricCard label="Avg shots" value={`${average(summary.shotsFor, summary.shotsRows)}-${average(summary.shotsAgainst, summary.shotsRows)}`} detail="For-against" />
+        <MetricCard label="Cards" value={`${summary.cardsFor}-${summary.cardsAgainst}`} detail="For-against" />
+      </div>
+
+      <div className="team-recent">
+        <h3>Recent matches</h3>
+        <div className="team-match-grid">
+          {summary.recent.map(({ match, view }) => (
+            <button className="team-match-row" key={match.id} type="button" onClick={() => onMatchSelect(match)}>
+              <span className={`form-badge ${view.result.toLowerCase()}`}>{view.result}</span>
+              <strong>{formatDate(match.match_date)}</strong>
+              <span>{view.isHome ? 'Home' : 'Away'} v {view.opponent}</span>
+              <em>{view.forGoals}-{view.againstGoals}</em>
+              <small>Corners {numberOrDash(view.cornersFor)}-{numberOrDash(view.cornersAgainst)} · Shots {numberOrDash(view.shotsFor)}-{numberOrDash(view.shotsAgainst)}</small>
+            </button>
+          ))}
+          {!loading && summary.recent.length === 0 ? <p className="muted">No completed matches found for this team under the current filters.</p> : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [metadataRows, setMetadataRows] = useState([]);
   const [matches, setMatches] = useState([]);
   const [selectedMatch, setSelectedMatch] = useState(null);
+  const [selectedTeam, setSelectedTeam] = useState(null);
+  const [teamMatches, setTeamMatches] = useState([]);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamError, setTeamError] = useState('');
   const [importRuns, setImportRuns] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -209,6 +367,54 @@ export default function App() {
     loadMatches();
   }, [filters]);
 
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase || !selectedTeam) return;
+
+    function applyScope(query) {
+      let scoped = query;
+      if (filters.country !== 'all') scoped = scoped.eq('country_code', filters.country);
+      if (filters.division !== 'all') scoped = scoped.eq('division', filters.division);
+      if (filters.season !== 'all') scoped = scoped.eq('season_code', filters.season);
+      return scoped;
+    }
+
+    async function loadTeamMatches() {
+      setTeamLoading(true);
+      setTeamError('');
+
+      const selectFields = 'id,country_name,division,division_name,season_code,season_label,match_date,home_team,away_team,fthg,ftag,ftr,home_shots,away_shots,home_shots_target,away_shots_target,home_corners,away_corners,home_fouls,away_fouls,home_yellow,away_yellow,home_red,away_red,avg_home_odds,avg_draw_odds,avg_away_odds,betting_odds,raw';
+      const homeQuery = applyScope(
+        supabase
+          .from('football_data_matches')
+          .select(selectFields)
+          .eq('home_team', selectedTeam)
+          .order('match_date', { ascending: false })
+          .limit(600),
+      );
+      const awayQuery = applyScope(
+        supabase
+          .from('football_data_matches')
+          .select(selectFields)
+          .eq('away_team', selectedTeam)
+          .order('match_date', { ascending: false })
+          .limit(600),
+      );
+
+      const [homeResult, awayResult] = await Promise.all([homeQuery, awayQuery]);
+      if (homeResult.error || awayResult.error) {
+        setTeamError(homeResult.error?.message || awayResult.error?.message || 'Could not load team data.');
+        setTeamMatches([]);
+      } else {
+        const byId = new Map();
+        [...(homeResult.data || []), ...(awayResult.data || [])].forEach((match) => byId.set(match.id, match));
+        setTeamMatches([...byId.values()].sort((a, b) => String(b.match_date).localeCompare(String(a.match_date))));
+      }
+      setTeamLoading(false);
+    }
+
+    loadTeamMatches();
+  }, [selectedTeam, filters.country, filters.division, filters.season]);
+
   const countries = useMemo(() => uniqueOptions(metadataRows, 'country_code', 'country_name'), [metadataRows]);
   const divisions = useMemo(() => {
     const rows = filters.country === 'all'
@@ -237,6 +443,20 @@ export default function App() {
       if (key === 'country') next.division = 'all';
       return next;
     });
+  }
+
+  function handleTeamSelect(teamName) {
+    setSelectedTeam(teamName);
+    window.setTimeout(() => {
+      document.querySelector('.team-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  }
+
+  function handleTeamMatchSelect(match) {
+    setSelectedMatch(match);
+    window.setTimeout(() => {
+      document.querySelector('.details-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
   }
 
   if (!isSupabaseConfigured) {
@@ -325,8 +545,17 @@ export default function App() {
           </div>
         </aside>
 
-        <MatchDetails match={selectedMatch} />
+        <MatchDetails match={selectedMatch} onTeamSelect={handleTeamSelect} />
       </section>
+
+      <TeamPanel
+        teamName={selectedTeam}
+        rows={teamMatches}
+        loading={teamLoading}
+        error={teamError}
+        onClose={() => setSelectedTeam(null)}
+        onMatchSelect={handleTeamMatchSelect}
+      />
 
       <section className="sync-card">
         <div className="section-title">
