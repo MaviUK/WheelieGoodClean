@@ -13,6 +13,15 @@ export const FOOTBALL_DATA_DIVISIONS = {
   EC: 'National League',
 };
 
+const CORE_RESULT_COLUMNS = new Set([
+  'Div', 'Date', 'Time', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR',
+  'HTHG', 'HTAG', 'HTR', 'Referee', 'HG', 'AG', 'Res',
+]);
+
+const MATCH_STAT_COLUMNS = new Set([
+  'HS', 'AS', 'HST', 'AST', 'HF', 'AF', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR',
+]);
+
 export function seasonCodeToLabel(code) {
   const start = Number.parseInt(code.slice(0, 2), 10);
   const end = Number.parseInt(code.slice(2, 4), 10);
@@ -107,6 +116,96 @@ function rowHash(row) {
   return crypto.createHash('sha1').update(JSON.stringify(row)).digest('hex');
 }
 
+function cleanedValue(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : value;
+}
+
+function buildJsonBucket(row, predicate) {
+  return Object.fromEntries(
+    Object.entries(row)
+      .filter(([key]) => predicate(key))
+      .map(([key, value]) => [key, cleanedValue(value)]),
+  );
+}
+
+function buildMatchStats(row) {
+  return {
+    raw: buildJsonBucket(row, (key) => MATCH_STAT_COLUMNS.has(key)),
+    home: {
+      shots: parseInteger(row.HS),
+      shots_on_target: parseInteger(row.HST),
+      fouls: parseInteger(row.HF),
+      corners: parseInteger(row.HC),
+      yellow_cards: parseInteger(row.HY),
+      red_cards: parseInteger(row.HR),
+    },
+    away: {
+      shots: parseInteger(row.AS),
+      shots_on_target: parseInteger(row.AST),
+      fouls: parseInteger(row.AF),
+      corners: parseInteger(row.AC),
+      yellow_cards: parseInteger(row.AY),
+      red_cards: parseInteger(row.AR),
+    },
+  };
+}
+
+function buildBettingOdds(row) {
+  const betting = buildJsonBucket(row, (key) => !CORE_RESULT_COLUMNS.has(key) && !MATCH_STAT_COLUMNS.has(key));
+  const grouped = {};
+
+  for (const [key, value] of Object.entries(betting)) {
+    const match = key.match(/^([A-Za-z0-9]+)(H|D|A|CH|CD|CA|O|U|CO|CU|AHH|AHA|CHH|CHA|AHCh|AHCa)$/);
+    const group = match ? match[1] : 'other';
+    grouped[group] ||= {};
+    grouped[group][key] = value;
+  }
+
+  return {
+    all: betting,
+    grouped,
+    summary: {
+      average: {
+        home: parseNumber(row.AvgH),
+        draw: parseNumber(row.AvgD),
+        away: parseNumber(row.AvgA),
+        over_25: parseNumber(row['Avg>2.5']),
+        under_25: parseNumber(row['Avg<2.5']),
+      },
+      maximum: {
+        home: parseNumber(row.MaxH),
+        draw: parseNumber(row.MaxD),
+        away: parseNumber(row.MaxA),
+        over_25: parseNumber(row['Max>2.5']),
+        under_25: parseNumber(row['Max<2.5']),
+      },
+      closing_average: {
+        home: parseNumber(row.AvgCH),
+        draw: parseNumber(row.AvgCD),
+        away: parseNumber(row.AvgCA),
+      },
+      closing_maximum: {
+        home: parseNumber(row.MaxCH),
+        draw: parseNumber(row.MaxCD),
+        away: parseNumber(row.MaxCA),
+      },
+    },
+  };
+}
+
+function buildSourceMetadata(row, sourceUrl) {
+  const columns = Object.keys(row);
+  return {
+    source_url: sourceUrl,
+    column_count: columns.length,
+    columns,
+    has_match_stats: columns.some((key) => MATCH_STAT_COLUMNS.has(key)),
+    betting_column_count: columns.filter((key) => !CORE_RESULT_COLUMNS.has(key) && !MATCH_STAT_COLUMNS.has(key)).length,
+  };
+}
+
 function csvRowToDbRow({ row, seasonCode, division, sourceUrl }) {
   return {
     country_code: 'ENG',
@@ -148,6 +247,9 @@ function csvRowToDbRow({ row, seasonCode, division, sourceUrl }) {
     avg_under_25: parseNumber(row['Avg<2.5']),
     max_over_25: parseNumber(row['Max>2.5']),
     max_under_25: parseNumber(row['Max<2.5']),
+    match_stats: buildMatchStats(row),
+    betting_odds: buildBettingOdds(row),
+    source_columns: buildSourceMetadata(row, sourceUrl),
     source_url: sourceUrl,
     row_hash: rowHash(row),
     raw: row,
