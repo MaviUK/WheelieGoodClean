@@ -3,6 +3,8 @@ import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 
 const PAGE_SIZE = 250;
 const TABLE_LIMIT = 1200;
+const METADATA_PAGE_SIZE = 5000;
+const METADATA_MAX_PAGES = 50;
 const TABLE_MODES = [
   { value: 'overall', label: 'Overall' },
   { value: 'home', label: 'Home table' },
@@ -506,6 +508,7 @@ export default function App() {
   const [tableRows, setTableRows] = useState([]);
   const [tableLoading, setTableLoading] = useState(false);
   const [tableError, setTableError] = useState('');
+  const [metadataLoading, setMetadataLoading] = useState(false);
   const [importRuns, setImportRuns] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -517,32 +520,58 @@ export default function App() {
     team: '',
   });
 
+  async function refreshMetadata() {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    setMetadataLoading(true);
+    setError('');
+
+    try {
+      const metadataMap = new Map();
+
+      for (let page = 0; page < METADATA_MAX_PAGES; page += 1) {
+        const from = page * METADATA_PAGE_SIZE;
+        const to = from + METADATA_PAGE_SIZE - 1;
+        const pageResult = await supabase
+          .from('football_data_matches')
+          .select('country_code,country_name,division,division_name,season_code,season_label')
+          .order('country_name', { ascending: true })
+          .order('division_name', { ascending: true })
+          .order('season_code', { ascending: false })
+          .range(from, to);
+
+        if (pageResult.error) throw pageResult.error;
+
+        for (const row of pageResult.data || []) {
+          const key = `${row.country_code || ''}|${row.division || ''}|${row.season_code || ''}`;
+          if (!metadataMap.has(key)) metadataMap.set(key, row);
+        }
+
+        if (!pageResult.data || pageResult.data.length < METADATA_PAGE_SIZE) break;
+      }
+
+      const runResult = await supabase
+        .from('football_data_import_runs')
+        .select('mode, status, started_at, finished_at, seasons, divisions, rows_imported, files_imported, files_tried')
+        .order('started_at', { ascending: false })
+        .limit(8);
+
+      setMetadataRows([...metadataMap.values()]);
+      if (!runResult.error) setImportRuns(runResult.data || []);
+    } catch (err) {
+      setError(err.message || 'Could not refresh country, division and season lists.');
+    } finally {
+      setMetadataLoading(false);
+    }
+  }
+
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) {
       setLoading(false);
       return;
     }
 
-    async function loadMetadata() {
-      const [metaResult, runResult] = await Promise.all([
-        supabase
-          .from('football_data_matches')
-          .select('country_code, country_name, division, division_name, season_code, season_label, home_team, away_team')
-          .order('match_date', { ascending: false })
-          .limit(10000),
-        supabase
-          .from('football_data_import_runs')
-          .select('mode, status, started_at, finished_at, seasons, divisions, rows_imported, files_imported, files_tried')
-          .order('started_at', { ascending: false })
-          .limit(8),
-      ]);
-
-      if (metaResult.error) setError(metaResult.error.message);
-      setMetadataRows(metaResult.data || []);
-      setImportRuns(runResult.data || []);
-    }
-
-    loadMetadata();
+    refreshMetadata();
   }, []);
 
   useEffect(() => {
@@ -788,6 +817,9 @@ export default function App() {
           Team search
           <input value={filters.team} onChange={(event) => updateFilter('team', event.target.value)} placeholder="Arsenal, Celtic, Barcelona..." />
         </label>
+        <button className="ghost-button metadata-refresh" type="button" onClick={refreshMetadata} disabled={metadataLoading}>
+          {metadataLoading ? 'Refreshing lists...' : 'Refresh country list'}
+        </button>
         {loading ? <span className="muted">Loading saved data...</span> : null}
         {error ? <span className="error">{error}</span> : null}
       </section>
