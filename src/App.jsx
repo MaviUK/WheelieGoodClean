@@ -3,8 +3,6 @@ import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 
 const PAGE_SIZE = 250;
 const TABLE_LIMIT = 1200;
-const METADATA_PAGE_SIZE = 5000;
-const METADATA_MAX_PAGES = 50;
 const TABLE_MODES = [
   { value: 'overall', label: 'Overall' },
   { value: 'home', label: 'Home table' },
@@ -202,12 +200,8 @@ function calculateLeagueTable(rows, mode = 'overall') {
     .sort((a, b) => String(a.match_date).localeCompare(String(b.match_date)));
 
   for (const match of completed) {
-    if (mode === 'overall' || mode === 'home') {
-      applyResult(match.home_team, match.fthg, match.ftag);
-    }
-    if (mode === 'overall' || mode === 'away') {
-      applyResult(match.away_team, match.ftag, match.fthg);
-    }
+    if (mode === 'overall' || mode === 'home') applyResult(match.home_team, match.fthg, match.ftag);
+    if (mode === 'overall' || mode === 'away') applyResult(match.away_team, match.ftag, match.fthg);
   }
 
   return [...table.values()]
@@ -527,39 +521,22 @@ export default function App() {
     setError('');
 
     try {
-      const metadataMap = new Map();
+      const [metadataResult, runResult] = await Promise.all([
+        supabase.rpc('get_football_data_metadata'),
+        supabase
+          .from('football_data_import_runs')
+          .select('mode, status, started_at, finished_at, seasons, divisions, rows_imported, files_imported, files_tried')
+          .order('started_at', { ascending: false })
+          .limit(8),
+      ]);
 
-      for (let page = 0; page < METADATA_MAX_PAGES; page += 1) {
-        const from = page * METADATA_PAGE_SIZE;
-        const to = from + METADATA_PAGE_SIZE - 1;
-        const pageResult = await supabase
-          .from('football_data_matches')
-          .select('country_code,country_name,division,division_name,season_code,season_label')
-          .order('country_name', { ascending: true })
-          .order('division_name', { ascending: true })
-          .order('season_code', { ascending: false })
-          .range(from, to);
+      if (metadataResult.error) throw metadataResult.error;
 
-        if (pageResult.error) throw pageResult.error;
-
-        for (const row of pageResult.data || []) {
-          const key = `${row.country_code || ''}|${row.division || ''}|${row.season_code || ''}`;
-          if (!metadataMap.has(key)) metadataMap.set(key, row);
-        }
-
-        if (!pageResult.data || pageResult.data.length < METADATA_PAGE_SIZE) break;
-      }
-
-      const runResult = await supabase
-        .from('football_data_import_runs')
-        .select('mode, status, started_at, finished_at, seasons, divisions, rows_imported, files_imported, files_tried')
-        .order('started_at', { ascending: false })
-        .limit(8);
-
-      setMetadataRows([...metadataMap.values()]);
+      setMetadataRows(metadataResult.data || []);
       if (!runResult.error) setImportRuns(runResult.data || []);
     } catch (err) {
-      setError(err.message || 'Could not refresh country, division and season lists.');
+      setMetadataRows([]);
+      setError(err.message || 'Could not refresh country, division and season lists. Run the get_football_data_metadata SQL function in Supabase.');
     } finally {
       setMetadataLoading(false);
     }
@@ -667,7 +644,12 @@ export default function App() {
       : metadataRows.filter((row) => row.country_code === filters.country);
     return uniqueOptions(rows, 'division', 'division_name');
   }, [metadataRows, filters.country]);
-  const seasons = useMemo(() => uniqueOptions(metadataRows, 'season_code', 'season_label').sort((a, b) => b.value.localeCompare(a.value)), [metadataRows]);
+  const seasons = useMemo(() => {
+    let rows = metadataRows;
+    if (filters.country !== 'all') rows = rows.filter((row) => row.country_code === filters.country);
+    if (filters.division !== 'all') rows = rows.filter((row) => row.division === filters.division);
+    return uniqueOptions(rows, 'season_code', 'season_label').sort((a, b) => b.value.localeCompare(a.value));
+  }, [metadataRows, filters.country, filters.division]);
 
   const tableScope = useMemo(() => {
     if (filters.division !== 'all' && filters.season !== 'all') {
@@ -738,7 +720,11 @@ export default function App() {
   function updateFilter(key, value) {
     setFilters((current) => {
       const next = { ...current, [key]: value };
-      if (key === 'country') next.division = 'all';
+      if (key === 'country') {
+        next.division = 'all';
+        next.season = 'all';
+      }
+      if (key === 'division') next.season = 'all';
       return next;
     });
   }
