@@ -12,11 +12,14 @@ export async function handler(event) {
     };
   }
 
+  const query = event.queryStringParameters || {};
   const payload = event.body ? JSON.parse(event.body) : {};
-  const mode = event.queryStringParameters?.mode || payload.mode || 'evening';
+  const mode = query.mode || payload.mode || 'sample';
+  const from = query.from || payload.from;
+  const to = query.to || payload.to;
 
   try {
-    const result = await runSync({ mode });
+    const result = await runSync({ mode, from, to });
     return {
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
