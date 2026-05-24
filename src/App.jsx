@@ -3,6 +3,11 @@ import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 
 const PAGE_SIZE = 250;
 const TABLE_LIMIT = 1200;
+const TABLE_MODES = [
+  { value: 'overall', label: 'Overall' },
+  { value: 'home', label: 'Home table' },
+  { value: 'away', label: 'Away table' },
+];
 
 function formatDate(value) {
   if (!value) return 'TBC';
@@ -161,7 +166,7 @@ function emptyTableRow(team) {
   };
 }
 
-function calculateLeagueTable(rows) {
+function calculateLeagueTable(rows, mode = 'overall') {
   const table = new Map();
 
   function ensure(team) {
@@ -195,8 +200,12 @@ function calculateLeagueTable(rows) {
     .sort((a, b) => String(a.match_date).localeCompare(String(b.match_date)));
 
   for (const match of completed) {
-    applyResult(match.home_team, match.fthg, match.ftag);
-    applyResult(match.away_team, match.ftag, match.fthg);
+    if (mode === 'overall' || mode === 'home') {
+      applyResult(match.home_team, match.fthg, match.ftag);
+    }
+    if (mode === 'overall' || mode === 'away') {
+      applyResult(match.away_team, match.ftag, match.fthg);
+    }
   }
 
   return [...table.values()]
@@ -208,6 +217,18 @@ function calculateLeagueTable(rows) {
       || a.team.localeCompare(b.team)
     ))
     .map((row, index) => ({ ...row, rank: index + 1, form: row.form.slice(-5) }));
+}
+
+function getTableResultMatches(rows, teamName, resultType, mode = 'overall') {
+  return [...rows]
+    .filter((match) => {
+      if (match.fthg === null || match.fthg === undefined || match.ftag === null || match.ftag === undefined) return false;
+      if (mode === 'home' && match.home_team !== teamName) return false;
+      if (mode === 'away' && match.away_team !== teamName) return false;
+      if (mode === 'overall' && match.home_team !== teamName && match.away_team !== teamName) return false;
+      return getTeamMatchView(match, teamName).result === resultType;
+    })
+    .sort((a, b) => String(b.match_date).localeCompare(String(a.match_date)));
 }
 
 function StatPill({ label, home, away }) {
@@ -312,13 +333,25 @@ function MatchDetails({ match, onTeamSelect }) {
   );
 }
 
-function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect }) {
-  const table = useMemo(() => calculateLeagueTable(rows), [rows]);
+function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect, onMatchSelect }) {
+  const [tableMode, setTableMode] = useState('overall');
+  const [drilldown, setDrilldown] = useState(null);
+  const table = useMemo(() => calculateLeagueTable(rows, tableMode), [rows, tableMode]);
   const playedMatches = rows.filter((match) => match.fthg !== null && match.fthg !== undefined).length;
+  const drilldownMatches = drilldown ? getTableResultMatches(rows, drilldown.team, drilldown.result, tableMode) : [];
+  const modeLabel = TABLE_MODES.find((mode) => mode.value === tableMode)?.label || 'Overall';
+
+  useEffect(() => {
+    setDrilldown(null);
+  }, [scope?.division, scope?.season, tableMode]);
+
+  function openDrilldown(team, result) {
+    setDrilldown({ team, result });
+  }
 
   return (
     <section className="league-table-card">
-      <div className="section-title">
+      <div className="section-title league-table-title">
         <div>
           <p className="eyebrow">League table</p>
           <h2>{scope?.divisionName || 'Select a division'} {scope?.seasonLabel ? `· ${scope.seasonLabel}` : ''}</h2>
@@ -326,9 +359,22 @@ function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect }) {
         <span>{table.length}</span>
       </div>
 
+      <div className="league-table-controls" role="group" aria-label="League table view">
+        {TABLE_MODES.map((mode) => (
+          <button
+            className={`table-mode-button ${tableMode === mode.value ? 'active' : ''}`}
+            key={mode.value}
+            type="button"
+            onClick={() => setTableMode(mode.value)}
+          >
+            {mode.label}
+          </button>
+        ))}
+      </div>
+
       <p className="muted table-help">
         {scope
-          ? `Calculated from ${playedMatches} completed imported matches. Change the Division and Season filters to view historic tables.`
+          ? `${modeLabel} calculated from ${playedMatches} completed imported matches. Click W, D or L totals to display the matching results.`
           : 'Choose a division and season, or select a match, to calculate the table.'}
       </p>
 
@@ -360,9 +406,9 @@ function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect }) {
                   <button className="table-team-button" type="button" onClick={() => onTeamSelect(row.team)}>{row.team}</button>
                 </td>
                 <td>{row.played}</td>
-                <td>{row.wins}</td>
-                <td>{row.draws}</td>
-                <td>{row.losses}</td>
+                <td><button className="table-stat-button win" type="button" disabled={!row.wins} onClick={() => openDrilldown(row.team, 'W')}>{row.wins}</button></td>
+                <td><button className="table-stat-button draw" type="button" disabled={!row.draws} onClick={() => openDrilldown(row.team, 'D')}>{row.draws}</button></td>
+                <td><button className="table-stat-button loss" type="button" disabled={!row.losses} onClick={() => openDrilldown(row.team, 'L')}>{row.losses}</button></td>
                 <td>{row.goalsFor}</td>
                 <td>{row.goalsAgainst}</td>
                 <td>{row.goalDifference}</td>
@@ -374,6 +420,31 @@ function LeagueTablePanel({ scope, rows, loading, error, onTeamSelect }) {
         </table>
         {!loading && table.length === 0 ? <p className="muted empty-table-message">No completed matches found for this table yet.</p> : null}
       </div>
+
+      {drilldown ? (
+        <div className="table-drilldown">
+          <div className="section-title compact-title">
+            <div>
+              <p className="eyebrow">{modeLabel}</p>
+              <h3>{drilldown.team} · {drilldown.result === 'W' ? 'Wins' : drilldown.result === 'D' ? 'Draws' : 'Losses'} · {drilldownMatches.length}</h3>
+            </div>
+            <button className="ghost-button" type="button" onClick={() => setDrilldown(null)}>Close</button>
+          </div>
+          <div className="drilldown-grid">
+            {drilldownMatches.map((match) => {
+              const view = getTeamMatchView(match, drilldown.team);
+              return (
+                <button className="drilldown-row" key={match.id} type="button" onClick={() => onMatchSelect(match)}>
+                  <span>{formatDate(match.match_date)}</span>
+                  <strong>{view.isHome ? 'Home' : 'Away'} v {view.opponent}</strong>
+                  <em>{view.forGoals}-{view.againstGoals}</em>
+                  <small>{match.division_name || match.division} · {match.season_label}</small>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -604,7 +675,7 @@ export default function App() {
 
       const result = await supabase
         .from('football_data_matches')
-        .select('id,country_name,division,division_name,season_code,season_label,match_date,home_team,away_team,fthg,ftag,ftr')
+        .select('id,country_name,division,division_name,season_code,season_label,match_date,home_team,away_team,fthg,ftag,ftr,home_shots,away_shots,home_shots_target,away_shots_target,home_corners,away_corners,home_fouls,away_fouls,home_yellow,away_yellow,home_red,away_red,avg_home_odds,avg_draw_odds,avg_away_odds,betting_odds,raw')
         .eq('division', tableScope.division)
         .eq('season_code', tableScope.season)
         .order('match_date', { ascending: true })
@@ -727,6 +798,7 @@ export default function App() {
         loading={tableLoading}
         error={tableError}
         onTeamSelect={handleTeamSelect}
+        onMatchSelect={handleTeamMatchSelect}
       />
 
       <section className="layout-grid">
