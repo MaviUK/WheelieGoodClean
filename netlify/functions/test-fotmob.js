@@ -5,7 +5,11 @@ function todayFotmobDate() {
 }
 
 async function fotmobFetch(endpoint, params = {}) {
-  const url = new URL(`${FOTMOB_BASE_URL}/${endpoint}`);
+  // FotMob's unofficial API expects a trailing slash after the endpoint name,
+  // for example /api/matches/?date=YYYYMMDD. Without it, FotMob returns the
+  // public HTML app shell with a 404.
+  const cleanEndpoint = String(endpoint).replace(/^\/+|\/+$/g, '');
+  const url = new URL(`${FOTMOB_BASE_URL}/${cleanEndpoint}/`);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') {
       url.searchParams.set(key, value);
@@ -27,8 +31,9 @@ async function fotmobFetch(endpoint, params = {}) {
     payload = { rawText: text.slice(0, 2000) };
   }
 
-  if (!response.ok) {
-    throw new Error(`FotMob ${endpoint} failed with ${response.status}: ${text.slice(0, 300)}`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!response.ok || contentType.includes('text/html')) {
+    throw new Error(`FotMob ${cleanEndpoint} failed with ${response.status}: ${text.slice(0, 300)}`);
   }
 
   return { url: url.toString(), payload };
