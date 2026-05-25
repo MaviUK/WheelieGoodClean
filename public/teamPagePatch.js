@@ -9,23 +9,53 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  function getLabelSelect(name) {
+    const labels = Array.from(document.querySelectorAll('label'));
+    const label = labels.find((item) => {
+      const text = Array.from(item.childNodes)
+        .find((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim())
+        ?.textContent.trim().toLowerCase();
+      return text === name;
+    });
+    return label?.querySelector('select') || null;
+  }
+
+  function navigateToTeam(team, event) {
+    if (!team) return;
+    event?.preventDefault();
+    event?.stopPropagation();
+    event?.stopImmediatePropagation?.();
+
+    const params = new URLSearchParams();
+    const div = getLabelSelect('division')?.value;
+    const season = getLabelSelect('season')?.value;
+    if (div && div !== 'all') params.set('division', div);
+    if (season && season !== 'all') params.set('season', season);
+
+    window.location.assign(`/team/${encodeURIComponent(team)}${params.toString() ? `?${params}` : ''}`);
+  }
+
   function linkTeamButtons() {
     document.querySelectorAll('.league-table .table-team-button').forEach((btn) => {
       if (btn.dataset.teamLinked) return;
       btn.dataset.teamLinked = '1';
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const team = btn.textContent.trim();
-        const title = document.querySelector('.league-table-card h2')?.textContent || '';
-        const params = new URLSearchParams();
-        const div = document.querySelector('label:nth-of-type(2) select')?.value;
-        const season = document.querySelector('label:nth-of-type(3) select')?.value;
-        if (div && div !== 'all') params.set('division', div);
-        if (season && season !== 'all') params.set('season', season);
-        location.href = `/team/${encodeURIComponent(team)}${params.toString() ? `?${params}` : ''}`;
-      }, true);
+      btn.style.cursor = 'pointer';
+      btn.title = `Open ${btn.textContent.trim()} team page`;
+      btn.addEventListener('click', (event) => navigateToTeam(btn.textContent.trim(), event), true);
     });
+  }
+
+  function setupLeagueTableClickNavigation() {
+    linkTeamButtons();
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest?.('.league-table .table-team-button');
+      if (btn) navigateToTeam(btn.textContent.trim(), event);
+    }, true);
+
+    const observer = new MutationObserver(linkTeamButtons);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('load', linkTeamButtons);
   }
 
   function row(label, obj) {
@@ -99,9 +129,12 @@
     return true;
   }
 
-  if (!loadTeamPage()) {
-    const observer = new MutationObserver(linkTeamButtons);
-    observer.observe(document.documentElement,{childList:true,subtree:true});
-    window.addEventListener('load',linkTeamButtons);
-  }
+  loadTeamPage()
+    .then((isTeamPage) => {
+      if (!isTeamPage) setupLeagueTableClickNavigation();
+    })
+    .catch((error) => {
+      console.warn('Team page patch failed:', error);
+      setupLeagueTableClickNavigation();
+    });
 })();
