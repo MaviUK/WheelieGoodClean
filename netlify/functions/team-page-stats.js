@@ -1,6 +1,8 @@
 import { getSupabaseAdmin } from './_shared/supabaseAdmin.js';
 
-const LIMIT = 2000;
+const LIMIT = 2500;
+const LEAGUE_LIMIT = 1500;
+const MAX_SELECTED_SEASONS = 12;
 const THRESH_GOALS = [0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5];
 const THRESH_CORNERS = [0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5,10.5,11.5,12.5];
 const THRESH_CARDS = [0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5];
@@ -10,6 +12,23 @@ const z = (v) => n(v) ?? 0;
 const pct = (a,b) => b ? Number(((a / b) * 100).toFixed(1)) : 0;
 const result = (gf,ga) => gf > ga ? 'W' : gf < ga ? 'L' : 'D';
 const points = (r) => r === 'W' ? 3 : r === 'D' ? 1 : 0;
+const pairKey = (division, season) => `${division}:${season}`;
+
+function parsePairs(value) {
+  return [...new Map(String(value || '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const parts = token.includes('|') ? token.split('|') : token.split(':');
+      const division = parts[0]?.trim();
+      const season = parts[1]?.trim();
+      if (!division || !season) return null;
+      return { division, season, key: pairKey(division, season) };
+    })
+    .filter(Boolean)
+    .map((pair) => [pair.key, pair])).values()].slice(0, MAX_SELECTED_SEASONS);
+}
 
 function view(match, team) {
   const home = match.home_team === team;
@@ -157,7 +176,7 @@ function leagueTable(rows, half=false, mode='all') {
   return [...map.values()].sort((a,b)=>b.pts-a.pts||b.gd-a.gd||b.gf-a.gf||a.team.localeCompare(b.team)).map((x,i)=>({...x,pos:i+1}));
 }
 
-function h2h(rows, team) {
+function h2h(rows) {
   const opponents = [...new Set(rows.map(r=>r.opponent))].sort();
   const byOpponent = {};
   for (const opp of opponents) {
@@ -167,33 +186,91 @@ function h2h(rows, team) {
   return { opponents, byOpponent };
 }
 
+function uniqueSeasonOptions(matches) {
+  const map = new Map();
+  for (const m of matches) {
+    const key = pairKey(m.division, m.season_code);
+    if (!map.has(key)) map.set(key, { key, division: m.division, divisionName: m.division_name, season: m.season_code, seasonLabel: m.season_label });
+  }
+  return [...map.values()].sort((a,b)=>b.season.localeCompare(a.season) || a.divisionName.localeCompare(b.divisionName));
+}
+
+async function fetchLeagueRows(supabase, cols, selectedPairs) {
+  const results = await Promise.all(selectedPairs.map((pair) => supabase
+    .from('football_data_matches')
+    .select(cols)
+    .eq('division', pair.division)
+    .eq('season_code', pair.season)
+    .order('match_date',{ascending:true})
+    .limit(LEAGUE_LIMIT)));
+
+  for (const result of results) if (result.error) throw result.error;
+  return results.flatMap((result) => result.data || []);
+}
+
 export async function handler(event) {
   try {
     const team = decodeURIComponent(event.queryStringParameters?.team || '').trim();
-    let division = event.queryStringParameters?.division;
-    let season = event.queryStringParameters?.season;
+    const division = event.queryStringParameters?.division;
+    const season = event.queryStringParameters?.season;
+    const requestedSelections = parsePairs(event.queryStringParameters?.selections);
     if (!team) return { statusCode:400, headers:{'content-type':'application/json'}, body:JSON.stringify({ok:false,error:'team is required'}) };
+
     const supabase = getSupabaseAdmin();
     const cols = 'id,match_date,country_name,division,division_name,season_code,season_label,home_team,away_team,fthg,ftag,hthg,htag,home_shots,away_shots,home_shots_target,away_shots_target,home_corners,away_corners,home_fouls,away_fouls,home_yellow,away_yellow,home_red,away_red';
-    let hq = supabase.from('football_data_matches').select(cols).eq('home_team',team).order('match_date',{ascending:false}).limit(LIMIT);
-    let aq = supabase.from('football_data_matches').select(cols).eq('away_team',team).order('match_date',{ascending:false}).limit(LIMIT);
-    if (division) { hq = hq.eq('division',division); aq = aq.eq('division',division); }
-    if (season) { hq = hq.eq('season_code',season); aq = aq.eq('season_code',season); }
-    const [hr,ar] = await Promise.all([hq,aq]);
+    const [hr,ar] = await Promise.all([
+      supabase.from('football_data_matches').select(cols).eq('home_team',team).order('match_date',{ascending:false}).limit(LIMIT),
+      supabase.from('football_data_matches').select(cols).eq('away_team',team).order('match_date',{ascending:false}).limit(LIMIT),
+    ]);
     if (hr.error) throw hr.error; if (ar.error) throw ar.error;
-    let matches = [...(hr.data||[]),...(ar.data||[])].sort((a,b)=>String(b.match_date).localeCompare(String(a.match_date)));
-    if (!division || !season) { const first = matches[0]; division = first?.division; season = first?.season_code; matches = matches.filter(m=>m.division===division&&m.season_code===season); }
+
+    const allMatches = [...(hr.data||[]),...(ar.data||[])].sort((a,b)=>String(b.match_date).localeCompare(String(a.match_date)));
+    const seasons = uniqueSeasonOptions(allMatches);
+    const availableMap = new Map(seasons.map((item) => [item.key, item]));
+
+    let selectedPairs = requestedSelections.length
+      ? requestedSelections
+      : (division && season ? [{ division, season, key: pairKey(division, season) }] : []);
+
+    selectedPairs = selectedPairs
+      .filter((pair) => availableMap.has(pair.key))
+      .map((pair) => ({ ...pair, ...availableMap.get(pair.key) }))
+      .slice(0, MAX_SELECTED_SEASONS);
+
+    if (!selectedPairs.length && seasons.length) selectedPairs = [seasons[0]];
+
+    const selectedKeySet = new Set(selectedPairs.map((pair) => pair.key));
+    const matches = allMatches.filter((match) => selectedKeySet.has(pairKey(match.division, match.season_code)));
     const sample = matches[0] || {};
     const views = splitViews(matches,team);
-    const seasons = [...new Map([...(hr.data||[]),...(ar.data||[])].map(m=>[`${m.division}|${m.season_code}`,{division:m.division,divisionName:m.division_name,season:m.season_code,seasonLabel:m.season_label}])).values()].sort((a,b)=>b.season.localeCompare(a.season)).slice(0,12);
-    const lr = await supabase.from('football_data_matches').select(cols).eq('division',division).eq('season_code',season).order('match_date',{ascending:true}).limit(LIMIT);
-    if (lr.error) throw lr.error;
-    const leagueRows = lr.data || [];
-    const response = { ok:true, team, division, season, divisionName: sample.division_name, seasonLabel: sample.season_label, seasons,
-      resultTable: resultTable(views), form: formStats(views), goals: goalStats(views), htPanels: htStatePanels(views),
+    const leagueRows = await fetchLeagueRows(supabase, cols, selectedPairs);
+
+    const selectedDivisions = [...new Set(selectedPairs.map((pair) => pair.divisionName || pair.division))];
+    const selectedSeasonLabels = selectedPairs.map((pair) => pair.seasonLabel || pair.season);
+    const selectedLabel = selectedPairs.length === 1
+      ? `${selectedPairs[0].divisionName || sample.division_name || selectedPairs[0].division} · ${selectedPairs[0].seasonLabel || sample.season_label || selectedPairs[0].season}`
+      : `${selectedPairs.length} selected seasons`;
+
+    const response = {
+      ok:true,
+      team,
+      division: selectedPairs[0]?.division || sample.division,
+      season: selectedPairs[0]?.season || sample.season_code,
+      divisionName: selectedDivisions.length === 1 ? selectedDivisions[0] : 'Multiple divisions',
+      seasonLabel: selectedPairs.length === 1 ? (selectedPairs[0]?.seasonLabel || sample.season_label) : selectedSeasonLabels.join(', '),
+      selectedLabel,
+      selectedKeys: selectedPairs.map((pair) => pair.key),
+      selectedPairs,
+      seasons,
+      resultTable: resultTable(views),
+      form: formStats(views),
+      goals: goalStats(views),
+      htPanels: htStatePanels(views),
       scoreAnalysis: { homeFt: topScores(views,false,true), homeHt: topScores(views,true,true), awayFt: topScores(views,false,false), awayHt: topScores(views,true,false) },
       overUnder: { goals:{home:ouRows(views,THRESH_GOALS,true,r=>r.gf,r=>r.gf+r.ga),away:ouRows(views,THRESH_GOALS,false,r=>r.gf,r=>r.gf+r.ga)}, corners:{home:ouRows(views,THRESH_CORNERS,true,r=>r.cornersFor,r=>r.cornersFor+r.cornersAgainst),away:ouRows(views,THRESH_CORNERS,false,r=>r.cornersFor,r=>r.cornersFor+r.cornersAgainst)}, cards:{home:ouRows(views,THRESH_CARDS,true,r=>r.yellowFor+r.redFor,r=>r.yellowFor+r.redFor+r.yellowAgainst+r.redAgainst),away:ouRows(views,THRESH_CARDS,false,r=>r.yellowFor+r.redFor,r=>r.yellowFor+r.redFor+r.yellowAgainst+r.redAgainst)} },
-      shots: shots(views), discipline: discipline(views), h2h: h2h(views,team),
+      shots: shots(views),
+      discipline: discipline(views),
+      h2h: h2h(views),
       leagueTables: { fullAll: leagueTable(leagueRows,false,'all'), fullHome: leagueTable(leagueRows,false,'home'), fullAway: leagueTable(leagueRows,false,'away'), halfAll: leagueTable(leagueRows,true,'all'), halfHome: leagueTable(leagueRows,true,'home'), halfAway: leagueTable(leagueRows,true,'away') }
     };
     return { statusCode:200, headers:{'content-type':'application/json','cache-control':'public, max-age=300'}, body:JSON.stringify(response) };
