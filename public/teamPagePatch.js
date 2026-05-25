@@ -1,5 +1,5 @@
 (() => {
-  const state = { data: null, table: 'fullAll', opponent: null };
+  const state = { data: null, table: 'fullAll', opponent: null, selectedKeys: [] };
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pct = (item) => item?.text || '0 (0%)';
 
@@ -47,12 +47,10 @@
 
   function setupLeagueTableClickNavigation() {
     linkTeamButtons();
-
     document.addEventListener('click', (event) => {
       const btn = event.target.closest?.('.league-table .table-team-button');
       if (btn) navigateToTeam(btn.textContent.trim(), event);
     }, true);
-
     const observer = new MutationObserver(linkTeamButtons);
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('load', linkTeamButtons);
@@ -76,7 +74,7 @@
 
   function leagueBox(data) {
     const rows = data.leagueTables[state.table] || [];
-    return `<section class="tp-card"><h2>League Table</h2><div class="tp-tabs">
+    return `<section class="tp-card"><h2>League Table</h2><p class="tp-muted small">For multi-season selections this table combines the selected seasons.</p><div class="tp-tabs">
       ${['fullAll','halfAll','fullAway'].map(k=>`<button data-table="${k}" class="${state.table===k?'active':''}">${k==='fullAll'?'Full Time':k==='halfAll'?'Half Time':'Away'}</button>`).join('')}
     </div>${leagueTable(rows,data.team)}</section>`;
   }
@@ -115,17 +113,54 @@
     return `<section class="tp-section"><h2>Head to Head Analysis</h2><select id="tp-opponent">${h.opponents.map(o=>`<option ${o===opp?'selected':''}>${esc(o)}</option>`).join('')}</select><div class="tp-card wide"><h2>Match History</h2>${rows.map(m=>`<div class="tp-match"><strong>${esc(m.homeTeam)} ${m.fthg} - ${m.ftag} ${esc(m.awayTeam)}</strong><span>${m.date}</span><small>HT: ${m.hthg}-${m.htag} · Shots: ${m.shots} · Corners: ${m.corners} · Cards: ${m.cards}</small></div>`).join('')}</div></section>`;
   }
 
+  function buildParams(team, keys) {
+    const params = new URLSearchParams();
+    params.set('team', team);
+    if (keys?.length) params.set('selections', keys.join(','));
+    return params;
+  }
+
+  function selectedKeysFromUrl() {
+    const selections = qs('selections');
+    if (selections) return selections.split(',').map((key) => key.trim()).filter(Boolean);
+    if (qs('division') && qs('season')) return [`${qs('division')}:${qs('season')}`];
+    return [];
+  }
+
+  function seasonSelector(data) {
+    const selected = new Set(data.selectedKeys || []);
+    return `<section class="tp-seasons"><div class="tp-season-head"><h2>Select Seasons</h2><div><button id="tp-select-all" type="button">Select All</button><button id="tp-clear-selection" type="button">Clear Selection</button><button id="tp-apply-seasons" type="button">Apply Selection</button></div></div><p class="tp-muted">Select one or more seasons, then apply. Stats below are combined across selected seasons.</p><div class="tp-season-list">${data.seasons.map(s=>`<button class="tp-season-choice ${selected.has(s.key)?'active':''}" type="button" data-key="${esc(s.key)}"><span>${esc(s.seasonLabel)}</span><small>${esc(s.divisionName)}</small></button>`).join('')}</div></section>`;
+  }
+
+  function attachTeamPageEvents(data) {
+    document.querySelectorAll('[data-table]').forEach(b=>b.addEventListener('click',()=>{state.table=b.dataset.table; document.querySelector('.tp-grid.two.top').innerHTML=resultBox(data.resultTable)+leagueBox(data); attachTeamPageEvents(data); }));
+    document.querySelector('#tp-opponent')?.addEventListener('change',e=>{state.opponent=e.target.value; document.querySelector('#tp-opponent').closest('.tp-section').outerHTML=h2hBox(data.h2h); attachTeamPageEvents(data);});
+
+    document.querySelectorAll('.tp-season-choice').forEach((button) => {
+      button.addEventListener('click', () => {
+        button.classList.toggle('active');
+      });
+    });
+    document.querySelector('#tp-select-all')?.addEventListener('click', () => document.querySelectorAll('.tp-season-choice').forEach((button) => button.classList.add('active')));
+    document.querySelector('#tp-clear-selection')?.addEventListener('click', () => document.querySelectorAll('.tp-season-choice').forEach((button) => button.classList.remove('active')));
+    document.querySelector('#tp-apply-seasons')?.addEventListener('click', () => {
+      let keys = Array.from(document.querySelectorAll('.tp-season-choice.active')).map((button) => button.dataset.key).filter(Boolean);
+      if (!keys.length) keys = data.selectedKeys?.length ? data.selectedKeys : [data.seasons[0]?.key].filter(Boolean);
+      const params = new URLSearchParams();
+      params.set('selections', keys.join(','));
+      window.location.assign(`/team/${encodeURIComponent(data.team)}?${params}`);
+    });
+  }
+
   async function loadTeamPage() {
     const team = teamFromUrl(); if (!team) return false;
     document.body.classList.add('team-page-active');
     document.querySelector('#root').innerHTML = '<main class="team-page"><h1>Loading team page...</h1></main>';
-    const params = new URLSearchParams(); params.set('team', team); if (qs('division')) params.set('division', qs('division')); if (qs('season')) params.set('season', qs('season'));
-    const res = await fetch(`/.netlify/functions/team-page-stats?${params}`); const data = await res.json(); state.data = data;
+    const params = buildParams(team, selectedKeysFromUrl());
+    const res = await fetch(`/.netlify/functions/team-page-stats?${params}`); const data = await res.json(); state.data = data; state.selectedKeys = data.selectedKeys || [];
     if (!data.ok) { document.querySelector('#root').innerHTML = `<main class="team-page"><h1>${esc(team)}</h1><p>${esc(data.error)}</p></main>`; return true; }
-    const seasonBtns = data.seasons.map(s=>`<a class="${s.season===data.season&&s.division===data.division?'active':''}" href="/team/${encodeURIComponent(data.team)}?division=${s.division}&season=${s.season}">${s.seasonLabel}<small>${s.divisionName}</small></a>`).join('');
-    document.querySelector('#root').innerHTML = `<main class="team-page"><a class="tp-back" href="/">← Back to league table</a><h1>${esc(data.team)}</h1><p class="tp-muted">${esc(data.divisionName)} · ${esc(data.seasonLabel)}</p><section class="tp-seasons"><h2>Select Seasons</h2><div>${seasonBtns}</div></section><div class="tp-grid two top">${resultBox(data.resultTable)}${leagueBox(data)}</div>${h2hBox(data.h2h)}${formBox(data.form)}${goalsBox(data.goals)}<section class="tp-grid three">${htPanel('Leading at HT',data.htPanels.leading)}${htPanel('Drawing at HT',data.htPanels.drawing)}${htPanel('Losing at HT',data.htPanels.losing)}</section>${scoreBox(data.scoreAnalysis)}${ouTable('Goals Over/Under',data.overUnder.goals)}${ouTable('Corners Over/Under',data.overUnder.corners)}${shotsBox(data.shots)}${ouTable('Cards Over/Under',data.overUnder.cards)}${disciplineBox(data.discipline)}</main>`;
-    document.querySelectorAll('[data-table]').forEach(b=>b.addEventListener('click',()=>{state.table=b.dataset.table; document.querySelector('.tp-grid.two.top').innerHTML=resultBox(data.resultTable)+leagueBox(data); }));
-    document.querySelector('#tp-opponent')?.addEventListener('change',e=>{state.opponent=e.target.value; document.querySelector('#tp-opponent').closest('.tp-section').outerHTML=h2hBox(data.h2h);});
+    document.querySelector('#root').innerHTML = `<main class="team-page"><a class="tp-back" href="/">← Back to league table</a><h1>${esc(data.team)}</h1><p class="tp-muted">${esc(data.selectedLabel || `${data.divisionName} · ${data.seasonLabel}`)}</p>${seasonSelector(data)}<div class="tp-grid two top">${resultBox(data.resultTable)}${leagueBox(data)}</div>${h2hBox(data.h2h)}${formBox(data.form)}${goalsBox(data.goals)}<section class="tp-grid three">${htPanel('Leading at HT',data.htPanels.leading)}${htPanel('Drawing at HT',data.htPanels.drawing)}${htPanel('Losing at HT',data.htPanels.losing)}</section>${scoreBox(data.scoreAnalysis)}${ouTable('Goals Over/Under',data.overUnder.goals)}${ouTable('Corners Over/Under',data.overUnder.corners)}${shotsBox(data.shots)}${ouTable('Cards Over/Under',data.overUnder.cards)}${disciplineBox(data.discipline)}</main>`;
+    attachTeamPageEvents(data);
     return true;
   }
 
